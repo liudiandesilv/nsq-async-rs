@@ -1,8 +1,5 @@
 # nsq-async-rs
 
-[![Crates.io](https://img.shields.io/crates/v/nsq-async-rs.svg)](https://crates.io/crates/nsq-async-rs)
-[![Docs.rs](https://docs.rs/nsq-async-rs/badge.svg)](https://docs.rs/nsq-async-rs)
-[![Build Status](https://github.com/liudiandesilv/nsq-async-rs/workflows/CI/badge.svg)](https://github.com/liudiandesilv/nsq-async-rs/actions)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 *其他语言版本: [English](README.md), [简体中文](README_zh.md)*
