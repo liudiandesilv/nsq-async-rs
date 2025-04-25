@@ -1,0 +1,28 @@
+[package]
+name = "nsq-async-rs"
+version = "0.1.0"
+edition = "2021"
+description = "A Rust NSQ client library"
+authors = ["YP Team"]
+
+[dependencies]
+tokio = { version = "1.0", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+log = "0.4"
+byteorder = "1.4"
+backoff = { version = "0.4", features = ["tokio"] }
+async-trait = "0.1"
+hostname = "0.3"
+reqwest = { version = "0.11", features = ["json"] }
+dashmap = "5.5.0"
+
+[dev-dependencies]
+chrono = "0.4"
+env_logger = "0.10"
+tokio = { version = "1.0", features = ["full", "test-util"] }
+
+[[example]]
+name = "consume"
+path = "examples/consume.rs"

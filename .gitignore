@@ -1,0 +1,16 @@
+# IDE
+.idea/
+.vscode/
+
+# Build
+target/
+Cargo.lock
+
+# Reference code
+go-nsq/
+
+.DS_Store
+.env
+.env.local
+.env.development.local
+.env.test.local
