@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 description = "A Rust NSQ client library"
 authors = ["YP Team"]
+repository = "https://github.com/liudiandesilv/nsq-async-rs"
+homepage = "https://github.com/liudiandesilv/nsq-async-rs"
+documentation = "https://github.com/liudiandesilv/nsq-async-rs"
+license = "MIT"
 
 [dependencies]
 tokio = { version = "1.0", features = ["full"] }
