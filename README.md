@@ -105,50 +105,70 @@ ConsumerConfig {
 ### Delayed Publishing
 
 ```rust
-producer.publish_with_delay("test_topic", "延迟消息".as_bytes(), 60).await?;
+producer.publish_with_delay("test_topic", "Delayed message".as_bytes(), Duration::from_secs(60)).await?;
 ```
 
-### 批量发布
+### Batch Publishing
 
 ```rust
 let messages = vec![
-    "消息1".as_bytes().to_vec(),
-    "消息2".as_bytes().to_vec(),
+    "Message 1".as_bytes().to_vec(),
+    "Message 2".as_bytes().to_vec(),
 ];
 producer.publish_multiple("test_topic", messages).await?;
 ```
 
-## 错误处理
+## Error Handling
 
-该库使用 `thiserror` 提供了详细的错误类型，包括：
+This library uses `thiserror` to provide detailed error types, including:
 
-- 连接错误
-- 协议错误
-- 超时错误
-- 消息处理错误
-- 配置错误
+- Connection errors
+- Protocol errors
+- Timeout errors
+- Message handling errors
+- Configuration errors
 
-## 贡献
+## Connection Pool
 
-欢迎提交 Issue 和 Pull Request！
+nsq-async-rs includes a built-in connection pool implementation that efficiently manages and reuses NSQ connections:
 
-## 许可证
+```rust
+// Create a custom connection pool configuration
+let pool_config = ConnectionPoolConfig {
+    max_connections_per_host: 10,
+    max_idle_time: Duration::from_secs(60),
+    health_check_interval: Duration::from_secs(30),
+    // ... other configurations
+};
+
+// Create the connection pool
+let pool = create_connection_pool(pool_config);
+
+// Use the connection pool with a producer
+let producer = new_producer(producer_config).with_connection_pool(pool);
+```
+
+## Contributing
+
+Contributions are welcome! Please feel free to submit issues and pull requests.
+
+## License
 
 MIT License
 
-## 实现说明
+## Implementation Notes
 
-本项目在设计和实现时参考了 NSQ 官方的 Go 客户端库 [go-nsq](https://github.com/nsqio/go-nsq)，主要包括：
+This project was designed and implemented with reference to NSQ's official Go client library [go-nsq](https://github.com/nsqio/go-nsq), including:
 
-- 消息处理流程
-- 连接管理机制
-- 错误处理策略
-- 配置参数设计
-- 优雅关闭机制
+- Message processing flow
+- Connection management mechanisms
+- Error handling strategies
+- Configuration parameter design
+- Graceful shutdown mechanism
 
-我们在保持与 go-nsq 功能一致性的同时，充分利用了 Rust 语言的特性，提供了：
+While maintaining functional parity with go-nsq, we've fully leveraged Rust language features to provide:
 
-- 更严格的类型安全
-- 基于 tokio 的异步支持
-- Rust 风格的错误处理
-- 更好的内存安全保证 
+- Stricter type safety
+- Asynchronous support based on tokio
+- Rust-style error handling
+- Improved memory safety guarantees 
