@@ -19,7 +19,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let topic = "test_topic";
     let mut messages = vec![];
 
-    for i in 0..50 {
+    for i in 0..100 {
         messages.push(format!(
             "第一条消息 #{},at:{}",
             i + 1,
@@ -50,7 +50,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let mut multi_messages = vec![];
 
-    for i in 0..50 {
+    for i in 0..100 {
         // 创建消息字符串
         let message = format!("多条消息 #{},at:{}", i + 1, Local::now().to_string());
 
@@ -67,9 +67,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     println!(
         "\n使用publish_multi发送字节数组，{} 条消息耗时: {:?}",
-        50, multi_elapsed
+        multi_messages.len(),
+        multi_elapsed
     );
-    println!("平均每条消息耗时: {:?}", multi_elapsed / 50_u32);
+    println!(
+        "平均每条消息耗时: {:?}",
+        multi_elapsed / multi_messages.len() as u32
+    );
 
     // 计算性能提升
     let speedup = individual_elapsed.as_micros() as f64 / multi_elapsed.as_micros() as f64;
