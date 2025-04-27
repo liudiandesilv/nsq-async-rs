@@ -56,6 +56,8 @@ pub struct ConsumerConfig {
     pub max_requeue_delay: Duration,
     pub default_requeue_delay: Duration,
     pub shutdown_timeout: Duration,
+    /// 是否使用指数退避策略进行重连
+    pub backoff_strategy: bool,
 }
 
 impl Default for ConsumerConfig {
@@ -71,6 +73,7 @@ impl Default for ConsumerConfig {
             max_requeue_delay: Duration::from_secs(15 * 60),
             default_requeue_delay: Duration::from_secs(90),
             shutdown_timeout: Duration::from_secs(30),
+            backoff_strategy: true,
         }
     }
 }
@@ -294,9 +297,17 @@ impl Consumer {
         let conn_clone = Arc::clone(&conn);
         let handler = Arc::new(ConnectionHandler::new(self));
         let addr_clone = addr.clone();
+        let config_clone = self.config.clone();
 
         // 启动消息处理循环
         tokio::spawn(async move {
+            // 初始重试延迟（秒）
+            let mut retry_delay = 1;
+            // 最大重试延迟（秒）
+            let max_retry_delay = 60;
+            // 重试计数
+            let mut retry_count = 0;
+
             loop {
                 match handler.handle_connection(Arc::clone(&conn_clone)).await {
                     Ok(_) => {
@@ -304,10 +315,49 @@ impl Consumer {
                         break;
                     }
                     Err(e) => {
-                        error!("连接循环错误: {}", e);
-                        // 等待一段时间后重试
-                        tokio::time::sleep(Duration::from_secs(1)).await;
-                        info!("正在尝试重新连接到 {}", addr_clone);
+                        retry_count += 1;
+                        let is_connection_error = matches!(e,
+                            Error::Io(ref io_err) if io_err.kind() == std::io::ErrorKind::BrokenPipe
+                            || io_err.kind() == std::io::ErrorKind::ConnectionReset
+                            || io_err.kind() == std::io::ErrorKind::ConnectionAborted
+                            || io_err.kind() == std::io::ErrorKind::UnexpectedEof
+                        ) || e.to_string().contains("early eof");
+
+                        // 根据错误类型决定是否需要重连
+                        if is_connection_error || matches!(e, Error::Timeout(_)) {
+                            error!("连接错误 (尝试 #{}) 到 {}: {}", retry_count, addr_clone, e);
+
+                            // 指数退避策略
+                            let sleep_duration = if config_clone.backoff_strategy {
+                                let jitter = rand::random::<f32>() * 0.3;
+                                let delay = (retry_delay as f32 * (1.0 + jitter)) as u64;
+                                retry_delay = std::cmp::min(retry_delay * 2, max_retry_delay);
+                                delay
+                            } else {
+                                retry_delay
+                            };
+
+                            info!("将在 {}秒 后尝试重新连接到 {}", sleep_duration, addr_clone);
+                            tokio::time::sleep(Duration::from_secs(sleep_duration)).await;
+
+                            // 尝试重新建立连接
+                            match conn_clone.reconnect().await {
+                                Ok(_) => {
+                                    // 重置重试计数和延迟
+                                    info!("成功重新连接到 {}", addr_clone);
+                                    retry_delay = 1;
+                                    retry_count = 0;
+                                }
+                                Err(conn_err) => {
+                                    error!("重新连接失败: {}", conn_err);
+                                    continue;
+                                }
+                            }
+                        } else {
+                            // 对于其他类型的错误，记录并中断
+                            error!("非连接错误，停止重试: {}", e);
+                            break;
+                        }
                     }
                 }
             }

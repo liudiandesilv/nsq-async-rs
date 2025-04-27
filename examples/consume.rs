@@ -51,6 +51,7 @@ async fn main() -> Result<()> {
         max_requeue_delay: Duration::from_secs(15 * 60),
         default_requeue_delay: Duration::from_secs(90),
         shutdown_timeout: Duration::from_secs(30), // 添加关闭超时时间
+        backoff_strategy: true, // 启用指数退避重连策略
     };
 
     // 创建消费者实例

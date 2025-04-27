@@ -28,6 +28,26 @@ pub struct Connection {
 }
 
 impl Connection {
+    /// 重新建立连接
+    pub async fn reconnect(&self) -> Result<()> {
+        let stream = Self::connect_with_retry(
+            &self.addr,
+            Duration::from_secs(5),
+            self.read_timeout,
+            self.write_timeout,
+        ).await?;
+        
+        // 替换现有的流
+        let mut current_stream = self.stream.lock().await;
+        *current_stream = stream;
+        
+        // 重新初始化连接
+        drop(current_stream); // 释放锁，避免死锁
+        self.initialize().await?;
+        
+        Ok(())
+    }
+    
     /// 创建新的连接
     pub async fn new<A: ToSocketAddrs + std::fmt::Display>(
         addr: A,
