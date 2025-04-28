@@ -43,7 +43,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .format_timestamp_millis()
         .init();
 
-    info!("开始 NSQ 性能测试 (使用OnceCell全局连接池)...");
+    info!("start pub single msg...");
 
     // 1. 异步测试 - 使用全局生产者
     let producer = get_producer().await;
@@ -62,14 +62,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             // 发送单条消息
             let topic = "test_topic";
-            let message = format!("异步消息 #{}", i);
+            let message = format!("async msg #{}", i);
 
             // 使用trait方法
             let result = Producer::publish(&*producer_clone, topic, message).await;
             let success = result.is_ok();
 
             let elapsed = start.elapsed();
-            info!("#{} 异步消息发送成功: {}, 耗时: {:?}", i, success, elapsed);
+            info!("#{} pub single msg: {}, use: {:?}", i, success, elapsed);
         });
         handlers.push(handler);
     }
@@ -80,7 +80,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     // 2. 同步测试 - 也使用共享的Producer实例
-    info!("开始同步发布消息...");
+    info!("pub single msg...");
 
     // 使用同步方式测试发送消息
     // 直接复用已初始化的全局生产者
@@ -103,12 +103,147 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let success = result.is_ok();
 
         let elapsed = start.elapsed();
-        info!("#{} 同步消息发送成功: {}, 耗时: {:?}", i, success, elapsed);
+        info!("#{} pub single msg: {}, use: {:?}", i, success, elapsed);
+    }
+
+    info!("pub delay msg...");
+
+    let topic = "test_topic";
+
+    for i in 1..=10 {
+        let start = Instant::now();
+        let message = format!("延迟消息 #{}", i);
+        let result = Producer::publish_delayed(
+            &*producer,
+            topic,
+            message,
+            std::time::Duration::from_secs(10),
+        )
+        .await;
+        let success = result.is_ok();
+        info!(
+            "#{} pub delay msg: {}, use: {:?}",
+            i,
+            success,
+            start.elapsed()
+        );
     }
 
     // 暂停一下，让日志输出完成
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
-    info!("NSQ 性能测试完成");
+    info!("pub single msg done");
     Ok(())
+}
+
+#[cfg(test)]
+mod pub_test {
+    use super::*;
+    use chrono::Local;
+    use log::info;
+    use nsq_async_rs::Producer;
+    use std::time::Instant;
+
+    #[tokio::test]
+    async fn test_interval_pub() {
+        // 初始化日志
+        env_logger::Builder::new()
+            .filter_level(log::LevelFilter::Info)
+            .format_timestamp_millis()
+            .init();
+
+        info!("开始运行定时发送测试");
+
+        // 使用定时器发送消息
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(500));
+        let topic = "test_interval";
+
+        let mut i = 1;
+        loop {
+            interval.tick().await;
+            let producer = get_producer().await;
+            let start = Instant::now();
+            let now = Local::now();
+
+            // 多异步
+            let mut handlers = vec![];
+            for j in 1..=10 {
+                let producer_clone = producer.clone();
+                let handler = tokio::spawn(async move {
+                    let message = format!("定时消息 #{}", now.format("%Y-%m-%d %H:%M:%S.%3f"));
+                    let result = Producer::publish(&*producer_clone, topic, message).await;
+                    let success = result.is_ok();
+                    info!(
+                        "第{}批次,#{} 发送定时消息: {}, use: {:?}",
+                        i,
+                        j,
+                        success,
+                        start.elapsed()
+                    );
+                });
+                handlers.push(handler);
+            }
+
+            for handler in handlers {
+                let _ = handler.await;
+            }
+
+            info!("第{}批次 发送定时消息完成", i);
+
+            i += 1;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_intervalpub_without_pool() {
+        // 初始化日志
+        env_logger::Builder::new()
+            .filter_level(log::LevelFilter::Info)
+            .format_timestamp_millis()
+            .init();
+
+        info!("开始运行定时发送测试");
+
+        // 使用定时器发送消息
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(500));
+        let topic = "test_interval";
+
+        let mut i = 1;
+        loop {
+            interval.tick().await;
+            let start = Instant::now();
+            let now = Local::now();
+
+            let mut config = ProducerConfig::default();
+            config.nsqd_addresses = vec!["127.0.0.1:4150".to_string()];
+            config.connection_timeout = tokio::time::Duration::from_secs(5);
+            // 多异步
+            let mut handlers = vec![];
+
+            for j in 1..=10 {
+                let producer = new_producer(config.clone());
+                let handler = tokio::spawn(async move {
+                    let message = format!("定时消息 #{}", now.format("%Y-%m-%d %H:%M:%S.%3f"));
+                    let result = producer.publish(topic, message).await;
+                    let success = result.is_ok();
+                    info!(
+                        "第{}批次,#{} 发送定时消息: {}, use: {:?}",
+                        i,
+                        j,
+                        success,
+                        start.elapsed()
+                    );
+                });
+                handlers.push(handler);
+            }
+
+            for handler in handlers {
+                let _ = handler.await;
+            }
+
+            info!("第{}批次 发送定时消息完成", i);
+
+            i += 1;
+        }
+    }
 }
