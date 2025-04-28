@@ -5,7 +5,7 @@
 
 *其他语言版本: [English](README.md), [简体中文](README_zh.md)*
 
-nsq-async-rs 是一个用 Rust 编写的 NSQ 客户端库，提供了高性能、可靠的消息队列客户端实现。该项目参考了官方的 [go-nsq](https://github.com/nsqio/go-nsq) 实现，并在 Rust 生态系统中提供了类似的功能和接口。
+nsq-async-rs 是一个用 Rust 编写的高性能、可靠的 NSQ 客户端库。该项目参考了官方的 [go-nsq](https://github.com/nsqio/go-nsq) 实现，并在 Rust 生态系统中提供了类似的功能和接口。
 
 ## 特性
 
