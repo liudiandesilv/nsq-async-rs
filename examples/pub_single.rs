@@ -26,7 +26,7 @@ async fn get_producer() -> Arc<NsqProducer> {
             // 预热连接池
             let topic = "test_topic";
             // 确保使用trait方法
-            let _ = Producer::publish(&producer, topic, "warmup").await;
+            let _ = producer.publish(topic, "warmup").await;
 
             info!("全局生产者初始化完成");
             Arc::new(producer)
@@ -65,7 +65,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let message = format!("async msg #{}", i);
 
             // 使用trait方法
-            let result = Producer::publish(&*producer_clone, topic, message).await;
+            let result = producer_clone.publish(topic, message).await;
             let success = result.is_ok();
 
             let elapsed = start.elapsed();
@@ -89,7 +89,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // 预热
     let topic = "test_topic";
     // 使用trait方法
-    let _ = Producer::publish(&*producer, topic, "warmup").await;
+    let _ = producer.publish(topic, "warmup").await;
 
     for i in 1..=10 {
         let start = Instant::now();
@@ -99,7 +99,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let message = format!("同步消息 #{}", i);
 
         // 使用trait方法
-        let result = Producer::publish(&*producer, topic, message).await;
+        let result = producer.publish(topic, message).await;
         let success = result.is_ok();
 
         let elapsed = start.elapsed();
@@ -113,13 +113,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     for i in 1..=10 {
         let start = Instant::now();
         let message = format!("延迟消息 #{}", i);
-        let result = Producer::publish_delayed(
-            &*producer,
-            topic,
-            message,
-            std::time::Duration::from_secs(10),
-        )
-        .await;
+        let result = producer
+            .publish_delayed(topic, message, std::time::Duration::from_secs(10))
+            .await;
         let success = result.is_ok();
         info!(
             "#{} pub delay msg: {}, use: {:?}",
@@ -171,7 +167,8 @@ mod pub_test {
                 let producer_clone = producer.clone();
                 let handler = tokio::spawn(async move {
                     let message = format!("定时消息 #{}", now.format("%Y-%m-%d %H:%M:%S.%3f"));
-                    let result = Producer::publish(&*producer_clone, topic, message).await;
+
+                    let result = producer_clone.publish(topic, message).await;
                     let success = result.is_ok();
                     info!(
                         "第{}批次,#{} 发送定时消息: {}, use: {:?}",
