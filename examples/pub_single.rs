@@ -1,8 +1,8 @@
+use log::info;
 use nsq_async_rs::connection_pool::create_default_connection_pool;
 use nsq_async_rs::producer::{new_producer, NsqProducer};
 use nsq_async_rs::Producer; // 添加Producer trait导入
 use nsq_async_rs::ProducerConfig;
-use log::info;
 use std::error::Error;
 use std::sync::Arc;
 use std::time::Instant;

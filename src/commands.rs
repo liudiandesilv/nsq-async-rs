@@ -38,9 +38,10 @@ pub async fn create_nsqd_connection<A: ToSocketAddrs + std::fmt::Display>(
         nsqd_addr,
         identify_config,
         auth_secret,
-        std::time::Duration::from_secs(60),  // 默认读超时
-        std::time::Duration::from_secs(1),   // 默认写超时
-    ).await?;
+        std::time::Duration::from_secs(60), // 默认读超时
+        std::time::Duration::from_secs(1),  // 默认写超时
+    )
+    .await?;
 
     Ok(Arc::new(connection))
 }

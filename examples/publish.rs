@@ -1,6 +1,6 @@
+use log::{debug, error, info, LevelFilter};
 use nsq_async_rs::error::Result;
 use nsq_async_rs::producer::{new_producer, Producer, ProducerConfig};
-use log::{debug, error, info, LevelFilter};
 use std::time::Duration;
 
 #[tokio::main]
