@@ -214,7 +214,7 @@ impl ConnectionPool {
         // 添加到连接池
         self.connections
             .entry(fingerprint.to_string())
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(pooled_connection);
 
         Ok(connection)

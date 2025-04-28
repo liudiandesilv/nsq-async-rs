@@ -223,7 +223,7 @@ impl Consumer {
         topic: String,
         channel: String,
         config: ConsumerConfig,
-        handler: impl Handler + Send + Sync + 'static,
+        handler: impl Handler,
     ) -> Result<Self> {
         if !Self::is_valid_topic_name(&topic) {
             return Err(Error::Other(format!("Invalid topic name: {}", topic)));
