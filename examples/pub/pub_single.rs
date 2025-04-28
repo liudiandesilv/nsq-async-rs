@@ -37,7 +37,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let start = Instant::now();
 
             // 发送单条消息
-            let topic = "test_topic";
+            let topic = "test_topic"; 
             let message = format!("async msg #{}", i);
 
             // 使用trait方法
