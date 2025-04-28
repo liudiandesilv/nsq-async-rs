@@ -46,4 +46,20 @@ tokio = { version = "1.0", features = ["full", "test-util"] }
 
 [[example]]
 name = "consume"
-path = "examples/consume.rs"
+path = "examples/consume/consume.rs"
+
+[[example]]
+name = "simple_consume"
+path = "examples/consume/simple_consume.rs"
+
+[[example]]
+name = "pub_single"
+path = "examples/pub/pub_single.rs"
+
+[[example]]
+name = "pub_muliti"
+path = "examples/pub/pub_muliti.rs"
+
+[[example]]
+name = "publish"
+path = "examples/pub/publish.rs"

@@ -1,5 +1,5 @@
 use log::info;
-use nsq_async_rs::connection_pool::create_default_connection_pool;
+use nsq_async_rs::connection_pool::{create_connection_pool, ConnectionPoolConfig};
 use nsq_async_rs::producer::{new_producer, NsqProducer};
 use nsq_async_rs::Producer; // 添加Producer trait导入
 use nsq_async_rs::ProducerConfig;
@@ -20,7 +20,13 @@ async fn get_producer() -> Arc<NsqProducer> {
 
             // 创建连接池并直接与Producer关联
             info!("应用层初始化全局连接池和生产者");
-            let pool = create_default_connection_pool();
+
+            let pool_config = ConnectionPoolConfig {
+                max_connections_per_host: 10,
+                ..Default::default()
+            };
+
+            let pool = create_connection_pool(pool_config);
             let producer = new_producer(config).with_connection_pool(pool);
 
             // 预热连接池
@@ -140,6 +146,7 @@ mod pub_test {
     use nsq_async_rs::Producer;
     use std::time::Instant;
 
+    /// test nsq-async-rs with connection pool
     #[tokio::test]
     async fn test_interval_pub() {
         // 初始化日志
@@ -154,10 +161,18 @@ mod pub_test {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(500));
         let topic = "test_interval";
 
+        let pool_config = ConnectionPoolConfig {
+            max_connections_per_host: 20,
+            ..Default::default()
+        };
+        let pool = create_connection_pool(pool_config);
+
+        let producer = Arc::new(new_producer(ProducerConfig::default()).with_connection_pool(pool));
+
         let mut i = 1;
         loop {
             interval.tick().await;
-            let producer = get_producer().await;
+            let producer = producer.clone();
             let start = Instant::now();
             let now = Local::now();
 
@@ -191,6 +206,7 @@ mod pub_test {
         }
     }
 
+    /// test nsq-async-rs without connection pool
     #[tokio::test]
     async fn test_intervalpub_without_pool() {
         // 初始化日志
