@@ -1,45 +1,12 @@
 use log::info;
-use nsq_async_rs::connection_pool::{create_connection_pool, ConnectionPoolConfig};
-use nsq_async_rs::producer::{new_producer, NsqProducer};
-use nsq_async_rs::Producer; // 添加Producer trait导入
-use nsq_async_rs::ProducerConfig;
+use nsq_async_rs::{
+    connection_pool::{create_connection_pool, ConnectionPoolConfig},
+    producer::new_producer,
+    Producer, ProducerConfig,
+};
 use std::error::Error;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::OnceCell as AsyncOnceCell;
-
-// 只使用一个全局生产者静态变量
-static GLOBAL_PRODUCER: AsyncOnceCell<Arc<NsqProducer>> = AsyncOnceCell::const_new();
-
-// 异步获取全局生产者
-async fn get_producer() -> Arc<NsqProducer> {
-    GLOBAL_PRODUCER
-        .get_or_init(|| async {
-            let mut config = ProducerConfig::default();
-            config.nsqd_addresses = vec!["127.0.0.1:4150".to_string()];
-
-            // 创建连接池并直接与Producer关联
-            info!("应用层初始化全局连接池和生产者");
-
-            let pool_config = ConnectionPoolConfig {
-                max_connections_per_host: 10,
-                ..Default::default()
-            };
-
-            let pool = create_connection_pool(pool_config);
-            let producer = new_producer(config).with_connection_pool(pool);
-
-            // 预热连接池
-            let topic = "test_topic";
-            // 确保使用trait方法
-            let _ = producer.publish(topic, "warmup").await;
-
-            info!("全局生产者初始化完成");
-            Arc::new(producer)
-        })
-        .await
-        .clone()
-}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -51,12 +18,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     info!("start pub single msg...");
 
-    // 1. 异步测试 - 使用全局生产者
-    let producer = get_producer().await;
+    let pool_config = ConnectionPoolConfig {
+        max_connections_per_host: 20,
+        ..Default::default()
+    };
+    let pool = create_connection_pool(pool_config);
+
+    let producer = Arc::new(new_producer(ProducerConfig::default()).with_connection_pool(pool));
 
     // 预热连接池
-    let topic = "test_topic";
-    let _ = producer.publish(topic, "warmup").await;
 
     let mut handlers = vec![];
 
@@ -90,7 +60,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // 使用同步方式测试发送消息
     // 直接复用已初始化的全局生产者
-    let producer = get_producer().await;
+    let producer = producer.clone();
 
     // 预热
     let topic = "test_topic";
