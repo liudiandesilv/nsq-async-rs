@@ -26,7 +26,7 @@ nsq-async-rs 是一个用 Rust 编写的高性能、可靠的 NSQ 客户端库�
 
 ```toml
 [dependencies]
-nsq-async-rs = "0.1.3"
+nsq-async-rs = "0.1.4"
 ```
 
 ## 快速开始
