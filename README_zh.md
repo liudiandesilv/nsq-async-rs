@@ -271,6 +271,25 @@ ConsumerConfig {
 
 ## 高级功能
 
+### 连接健康检查 (Ping)
+
+```rust
+// 使用默认超时时间（5秒）进行 ping
+let result = producer.ping(None, None).await;
+
+// 使用自定义地址和超时时间进行 ping
+let result = producer.ping(
+    Some("127.0.0.1:4150"),
+    Some(Duration::from_millis(500))
+).await;
+
+// 在继续操作前检查 ping 结果
+if let Err(err) = result {
+    println!("NSQ服务器连接异常: {}", err);
+    // 处理连接异常...
+}
+```
+
 ### 延迟发布
 
 ```rust

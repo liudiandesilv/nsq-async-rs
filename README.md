@@ -271,6 +271,25 @@ ConsumerConfig {
 
 ## Advanced Features
 
+### Connection Health Check (Ping)
+
+```rust
+// Ping with default timeout (5 seconds)
+let result = producer.ping(None, None).await;
+
+// Ping with custom address and timeout
+let result = producer.ping(
+    Some("127.0.0.1:4150"),
+    Some(Duration::from_millis(500))
+).await;
+
+// Check ping result before proceeding
+if let Err(err) = result {
+    println!("NSQ服务器连接异常: {}", err);
+    // 处理连接异常...
+}
+```
+
 ### Delayed Publishing
 
 ```rust
