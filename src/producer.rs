@@ -87,6 +87,17 @@ pub trait Producer: Send + Sync {
         topic: &str,
         messages: Vec<T>,
     ) -> Result<()>;
+    
+    /// 发送 ping 命令检测连接状态
+    /// 
+    /// # 参数
+    /// * `addr` - 要 ping 的 NSQ 服务器地址，如果为 None，则使用配置中的第一个地址
+    /// * `timeout` - 超时时间，默认为 5 秒
+    /// 
+    /// # 返回
+    /// * `Ok(())` - 如果连接正常
+    /// * `Err(Error)` - 如果连接异常或超时
+    async fn ping(&self, addr: Option<&str>, timeout: Option<Duration>) -> Result<()>;
 
     /// 设置外部连接池 - 返回原始类型，不能直接使用
     fn with_connection_pool(self, _pool: Arc<ConnectionPool>) -> Self
@@ -190,6 +201,31 @@ impl NsqProducer {
 
 #[async_trait]
 impl Producer for NsqProducer {
+    async fn ping(&self, addr: Option<&str>, timeout: Option<Duration>) -> Result<()> {
+        let target_addr = match addr {
+            Some(a) => a.to_string(),
+            None => {
+                if !self.config.nsqd_addresses.is_empty() {
+                    self.config.nsqd_addresses[0].clone()
+                } else if !self.config.nsqlookupd_addresses.is_empty() {
+                    // 如果没有直接的 nsqd 地址，尝试从 nsqlookupd 获取
+                    // 使用一个特殊的主题名仅用于 ping 目的
+                    let nsqd_nodes = lookup_nsqd_nodes(&self.config.nsqlookupd_addresses[0], "_ping_topic").await?;
+                    if nsqd_nodes.is_empty() {
+                        return Err(Error::Connection("没有可用的 NSQ 服务器地址".to_string()));
+                    }
+                    nsqd_nodes[0].clone()
+                } else {
+                    return Err(Error::Config("没有配置 NSQ 服务器地址".to_string()));
+                }
+            }
+        };
+
+        // 获取连接并发送 ping
+        let connection = self.get_or_create_connection(&target_addr).await?;
+        connection.ping(timeout).await
+    }
+
     async fn publish<T: AsRef<[u8]> + Send + Sync>(&self, topic: &str, message: T) -> Result<()> {
         let backoff = ExponentialBackoffBuilder::new()
             .with_initial_interval(self.config.backoff_config.initial_interval)

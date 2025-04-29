@@ -1,12 +1,12 @@
-use log::info;
+use log::{info, warn};
 use nsq_async_rs::{
     connection_pool::{create_connection_pool, ConnectionPoolConfig},
     producer::new_producer,
     Producer, ProducerConfig,
 };
-use std::error::Error;
 use std::sync::Arc;
 use std::time::Instant;
+use std::{error::Error, time::Duration};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -24,7 +24,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
     };
     let pool = create_connection_pool(pool_config);
 
-    let producer = Arc::new(new_producer(ProducerConfig::default()).with_connection_pool(pool));
+    let p_cfg = ProducerConfig {
+        nsqd_addresses: vec!["127.0.0.1:4150".to_string()],
+        ..Default::default()
+    };
+
+    let producer = new_producer(p_cfg);
+
+    //ping
+    let res = producer.ping(None, Some(Duration::from_millis(500))).await;
+
+    info!("ping res {:?}", res);
+
+    if let Err(err) = res {
+        warn!("ping err {}", err);
+        //异常退出
+    }
+
+    let producer = Arc::new(producer.with_connection_pool(pool));
 
     // 预热连接池
 
@@ -37,7 +54,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let start = Instant::now();
 
             // 发送单条消息
-            let topic = "test_topic"; 
+            let topic = "test_topic";
             let message = format!("async msg #{}", i);
 
             // 使用trait方法

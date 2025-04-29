@@ -248,6 +248,28 @@ impl Connection {
         self.send_command(Command::Nop).await
     }
 
+    /// 发送 ping 命令并等待响应，用于检测连接是否活跃
+    ///
+    /// 使用 NOP 命令实现，并添加超时机制
+    ///
+    /// # 参数
+    /// * `timeout_duration` - 超时时间，默认为 5 秒
+    ///
+    /// # 返回
+    /// * `Ok(())` - 如果连接正常
+    /// * `Err(Error)` - 如果连接异常或超时
+    pub async fn ping(&self, timeout_duration: Option<Duration>) -> Result<()> {
+        let timeout_dur = timeout_duration.unwrap_or(Duration::from_secs(5));
+
+        match timeout(timeout_dur, self.send_command(Command::Nop)).await {
+            Ok(result) => result,
+            Err(_) => Err(Error::Timeout(format!(
+                "Ping 操作超时 ({}秒)",
+                timeout_dur.as_secs()
+            ))),
+        }
+    }
+
     /// 读取消息 - 参考Go客户端中的readLoop实现
     pub async fn read_message(&self) -> Result<Option<Message>> {
         match self.read_frame().await {

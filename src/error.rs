@@ -24,8 +24,12 @@ pub enum Error {
     Protocol(#[from] ProtocolError),
 
     /// 超时错误
+    #[error("操作超时: {0}")]
+    Timeout(String),
+
+    /// tokio 超时错误
     #[error("操作超时")]
-    Timeout(#[from] Elapsed),
+    TimedOut(#[from] Elapsed),
 
     /// 认证错误
     #[error("认证失败: {0}")]
