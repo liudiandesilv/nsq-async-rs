@@ -316,25 +316,114 @@ This library uses `thiserror` to provide detailed error types, including:
 - Message handling errors
 - Configuration errors
 
-## Connection Pool
+## Connection Pool with Deadpool
 
-nsq-async-rs includes a built-in connection pool implementation that efficiently manages and reuses NSQ connections:
+This library includes a built-in connection pool implementation that efficiently manages and reuses NSQ connections. Here's an example of using the Deadpool connection pool:
 
 ```rust
-// Create a custom connection pool configuration
-let pool_config = ConnectionPoolConfig {
-    max_connections_per_host: 10,
-    max_idle_time: Duration::from_secs(60),
-    health_check_interval: Duration::from_secs(30),
-    // ... other configurations
-};
+use anyhow::Result;
+use deadpool::managed::{Manager, Metrics, Pool, RecycleResult};
+use nsq_async_rs::producer::{NsqProducer, ProducerConfig};
+use std::time::Duration;
+use tokio::sync::OnceCell;
 
-// Create the connection pool
-let pool = create_connection_pool(pool_config);
+// Define the connection manager
+struct ProducerManager;
 
-// Use the connection pool with a producer
-let producer = new_producer(producer_config).with_connection_pool(pool);
+impl Manager for ProducerManager {
+    type Type = NsqProducer;
+    type Error = anyhow::Error;
+
+    async fn create(&self) -> Result<Self::Type, Self::Error> {
+        let config = get_producer_config().await;
+        let producer = NsqProducer::new(config);
+        info!("Created new NSQ producer connection");
+        Ok(producer)
+    }
+
+    async fn recycle(
+        &self,
+        producer: &mut Self::Type,
+        metrics: &Metrics,
+    ) -> RecycleResult<Self::Error> {
+        // Check connection health
+        let res = producer.ping(None, Some(Duration::from_millis(500))).await;
+        
+        match res {
+            Ok(_) => {
+                info!(
+                    "Connection health check passed - Recycle count: {}, Created: {:?}",
+                    metrics.recycle_count,
+                    metrics.created
+                );
+                Ok(())
+            }
+            Err(err) => {
+                error!("Connection health check failed: {}", err);
+                Err(RecycleError::Message(format!("Connection health check failed: {}", err).into()))
+            }
+        }
+    }
+}
+
+// Define pool type
+type ProducerPool = Pool<ProducerManager>;
+
+// Global connection pool
+static PRODUCER_POOL: OnceCell<ProducerPool> = OnceCell::const_new();
+
+// Get pool instance
+async fn get_producer_pool() -> &'static ProducerPool {
+    PRODUCER_POOL
+        .get_or_init(|| async {
+            Pool::builder(ProducerManager)
+                .max_size(5) // Maximum number of connections
+                .build()
+                .expect("Failed to create producer pool")
+        })
+        .await
+}
+
+// Send message using connection pool
+async fn send_message(topic: &str, message: &str) -> Result<()> {
+    let pool = get_producer_pool().await;
+    let producer = pool.get().await.map_err(|e| anyhow::anyhow!("{}", e))?;
+    
+    producer.publish(topic, message.as_bytes()).await.map_err(|e| anyhow::anyhow!("{}", e))?;
+    Ok(())
+}
+
+// Concurrent message sending example
+async fn send_messages_concurrently() -> Result<()> {
+    let topic = "test_topic";
+    let mut tasks = Vec::new();
+    
+    for i in 0..10 {
+        let message = format!("Message #{}", i);
+        let handle = tokio::spawn(async move {
+            match send_message(topic, &message).await {
+                Ok(_) => info!("Successfully sent message: {}", message),
+                Err(e) => error!("Failed to send message: {}", e),
+            }
+        });
+        tasks.push(handle);
+    }
+    
+    for task in tasks {
+        task.await.unwrap();
+    }
+    
+    Ok(())
+}
 ```
+
+The Deadpool connection pool provides:
+- Automatic connection management
+- Connection health checks
+- Connection recycling
+- Concurrent access support
+- Configurable pool size
+- Built-in metrics
 
 ## Contributing
 
