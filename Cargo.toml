@@ -38,6 +38,8 @@ hostname = "0.3"
 reqwest = { version = "0.12.15", features = ["json"], optional = true }
 dashmap = "5.5"
 rand = "0.8"
+deadpool = "0.12"
+anyhow = "1.0"
 
 [dev-dependencies]
 chrono = "0.4"
@@ -63,3 +65,7 @@ path = "examples/pub/pub_muliti.rs"
 [[example]]
 name = "publish"
 path = "examples/pub/publish.rs"
+
+[[example]]
+name = "pub_with_deadpool"
+path = "examples/pub/pub_with_deadpool.rs"
