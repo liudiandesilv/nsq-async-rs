@@ -7,7 +7,7 @@ use backoff::ExponentialBackoffBuilder;
 use log::debug;
 use tokio::sync::RwLock;
 
-use crate::commands::{create_nsqd_connection, lookup_nsqd_nodes};
+use crate::commands::lookup_nsqd_nodes;
 use crate::connection::Connection;
 use crate::error::{Error, Result};
 use crate::protocol::{Command, Frame, IdentifyConfig, ProtocolError};
@@ -118,27 +118,36 @@ impl NsqProducer {
 
     /// 获取或创建到NSQ服务器的连接
     async fn get_or_create_connection(&self, addr: &str) -> Result<Arc<Connection>> {
-        // 尝试从内部连接池获取连接
-        let connections = self.connections.read().await;
-        if let Some(connection) = connections.get(addr) {
-            return Ok(connection.clone());
+        let mut connections = self.connections.write().await;
+
+        // 检查现有连接
+        if let Some(conn) = connections.get(addr) {
+            // 简单的 ping 检测
+            match conn.ping(None).await {
+                Ok(_) => {
+                    // 连接有效，直接复用
+                    return Ok(conn.clone());
+                }
+                Err(_) => {
+                    // 连接无效，移除并重新创建
+                    connections.remove(addr);
+                }
+            }
         }
-        drop(connections);
 
         // 创建新连接
-        debug!("为地址 {} 创建新连接", addr);
-        let connection = create_nsqd_connection(
-            addr,
+        let conn = Connection::new(
+            addr.to_string(),
             self.config.identify_config.clone(),
             self.config.auth_secret.clone(),
+            self.config.connection_timeout,
+            self.config.connection_timeout,
         )
         .await?;
 
-        // 添加连接到内部连接池
-        let mut connections = self.connections.write().await;
-        connections.insert(addr.to_string(), connection.clone());
-
-        Ok(connection)
+        let conn = Arc::new(conn);
+        connections.insert(addr.to_string(), conn.clone());
+        Ok(conn)
     }
 
     /// 获取用于发布消息的连接
@@ -364,6 +373,11 @@ impl NsqProducer {
     /// 获取生产者配置
     pub fn config(&self) -> &ProducerConfig {
         &self.config
+    }
+
+    /// 获取连接池大小
+    pub async fn get_connection_pool_size(&self) -> usize {
+        self.connections.read().await.len()
     }
 }
 
