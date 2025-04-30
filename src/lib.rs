@@ -7,9 +7,9 @@ pub mod connection;
 pub mod consumer;
 pub mod error;
 pub mod lookup;
+pub mod pool;
 pub mod producer;
 pub mod protocol;
-
 // 重导出常用类型
 pub use consumer::{Consumer, ConsumerConfig, Handler};
 pub use error::{Error, Result};
