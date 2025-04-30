@@ -3,26 +3,26 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Crates.io](https://img.shields.io/crates/v/nsq-async-rs.svg)](https://crates.io/crates/nsq-async-rs)
 
-*Read this in other languages: [English](README.md), [简体中文](README_zh.md)*
+*Other language versions: [English](README.md), [简体中文](README_zh.md)*
 
-A high-performance, reliable NSQ client library written in Rust. This project provides similar functionality and interfaces to the official [go-nsq](https://github.com/nsqio/go-nsq) implementation within the Rust ecosystem.
+nsq-async-rs is a high-performance, reliable NSQ client library written in Rust. The project is inspired by the official [go-nsq](https://github.com/nsqio/go-nsq) implementation and provides similar functionality and interfaces in the Rust ecosystem.
 
 ## Features
 
-- ✨ Asynchronous I/O support (based on tokio)
+- ✨ Async I/O support (based on tokio)
 - 🚀 High-performance message processing
 - 🔄 Automatic reconnection and error retry
 - 🔍 Support for nsqlookupd service discovery
 - 🛡️ Graceful shutdown support
 - 📊 Built-in message statistics
-- ⚡ Delayed publishing support
-- 📦 Batch publishing support
-- 🔀 Concurrent message processing
-- 💫 Feature parity with the official go-nsq client
+- ⚡ Support for delayed publishing
+- 📦 Support for batch publishing
+- 🔀 Support for concurrent message processing
+- 💫 Feature parity with official go-nsq
 
 ## Installation
 
-Add the following dependency to your `Cargo.toml` file:
+Add the following to your `Cargo.toml`:
 
 ```toml
 [dependencies]
@@ -126,9 +126,9 @@ impl ConcurrentMessageHandler {
                     let msg_id = String::from_utf8_lossy(&msg.id).to_string();
                     info!("Worker {} processing message: {}", worker_id, msg_id);
                     
-                    // Your message processing logic here
+                    // Add your message processing logic here
                     
-                    info!("Worker {} completed message: {}", worker_id, msg_id);
+                    info!("Worker {} finished processing message: {}", worker_id, msg_id);
                 }
             });
         }
@@ -168,9 +168,9 @@ impl Handler for ConcurrentMessageHandler {
 async fn main() -> Result<()> {
     // Create consumer config
     let config = ConsumerConfig {
-        max_in_flight: 100, // Increase for better throughput
+        max_in_flight: 100, // Increase for higher throughput
         max_attempts: 5,
-        // other config options...
+        // Other config options...
         ..Default::default()
     };
 
@@ -231,19 +231,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut messages = vec![];
     for i in 0..100 {
         messages.push(format!(
-            "Message #{},at:{}",
+            "Message #{}, Time:{}",
             i + 1,
             Local::now().to_string()
         ));
     }
 
-    // Measure performance of batch publishing
+    // Measure batch publishing performance
     let start = Instant::now();
     producer.publish_multi(topic, messages).await?;
     let elapsed = start.elapsed();
 
-    println!("Published 100 messages in {:?}", elapsed);
-    println!("Average per message: {:?}", elapsed / 100);
+    println!("Batch publishing 100 messages took: {:?}", elapsed);
+    println!("Average time per message: {:?}", elapsed / 100);
 
     Ok(())
 }
@@ -255,16 +255,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
 ```rust
 ConsumerConfig {
-    max_in_flight: 100,                   // Maximum number of messages to process simultaneously
-    max_attempts: 5,                       // Maximum retry attempts
+    max_in_flight: 100,                  // Maximum number of messages to process simultaneously
+    max_attempts: 5,                     // Maximum number of retries
     dial_timeout: Duration::from_secs(1),  // Connection timeout
     read_timeout: Duration::from_secs(60), // Read timeout
     write_timeout: Duration::from_secs(1), // Write timeout
-    lookup_poll_interval: Duration::from_secs(60),
-    lookup_poll_jitter: 0.3,
-    max_requeue_delay: Duration::from_secs(15 * 60),
-    default_requeue_delay: Duration::from_secs(90),
-    shutdown_timeout: Duration::from_secs(30),
+    lookup_poll_interval: Duration::from_secs(60), // nsqlookupd polling interval
+    lookup_poll_jitter: 0.3,              // Polling jitter coefficient
+    max_requeue_delay: Duration::from_secs(15 * 60), // Maximum requeue delay
+    default_requeue_delay: Duration::from_secs(90),  // Default requeue delay
+    shutdown_timeout: Duration::from_secs(30),       // Shutdown timeout
     backoff_strategy: true,                // Enable exponential backoff reconnection strategy
 }
 ```
@@ -285,8 +285,8 @@ let result = producer.ping(
 
 // Check ping result before proceeding
 if let Err(err) = result {
-    println!("NSQ服务器连接异常: {}", err);
-    // 处理连接异常...
+    println!("NSQ server connection error: {}", err);
+    // Handle connection error...
 }
 ```
 
@@ -302,128 +302,10 @@ producer.publish_with_delay("test_topic", "Delayed message".as_bytes(), Duration
 let messages = vec![
     "Message 1".as_bytes().to_vec(),
     "Message 2".as_bytes().to_vec(),
+    "Message 3".as_bytes().to_vec(),
 ];
 producer.publish_multiple("test_topic", messages).await?;
 ```
-
-## Error Handling
-
-This library uses `thiserror` to provide detailed error types, including:
-
-- Connection errors
-- Protocol errors
-- Timeout errors
-- Message handling errors
-- Configuration errors
-
-## Connection Pool with Deadpool
-
-This library includes a built-in connection pool implementation that efficiently manages and reuses NSQ connections. Here's an example of using the Deadpool connection pool:
-
-```rust
-use anyhow::Result;
-use deadpool::managed::{Manager, Metrics, Pool, RecycleResult};
-use nsq_async_rs::producer::{NsqProducer, ProducerConfig};
-use std::time::Duration;
-use tokio::sync::OnceCell;
-
-// Define the connection manager
-struct ProducerManager;
-
-impl Manager for ProducerManager {
-    type Type = NsqProducer;
-    type Error = anyhow::Error;
-
-    async fn create(&self) -> Result<Self::Type, Self::Error> {
-        let config = get_producer_config().await;
-        let producer = NsqProducer::new(config);
-        info!("Created new NSQ producer connection");
-        Ok(producer)
-    }
-
-    async fn recycle(
-        &self,
-        producer: &mut Self::Type,
-        metrics: &Metrics,
-    ) -> RecycleResult<Self::Error> {
-        // Check connection health
-        let res = producer.ping(None, Some(Duration::from_millis(500))).await;
-        
-        match res {
-            Ok(_) => {
-                info!(
-                    "Connection health check passed - Recycle count: {}, Created: {:?}",
-                    metrics.recycle_count,
-                    metrics.created
-                );
-                Ok(())
-            }
-            Err(err) => {
-                error!("Connection health check failed: {}", err);
-                Err(RecycleError::Message(format!("Connection health check failed: {}", err).into()))
-            }
-        }
-    }
-}
-
-// Define pool type
-type ProducerPool = Pool<ProducerManager>;
-
-// Global connection pool
-static PRODUCER_POOL: OnceCell<ProducerPool> = OnceCell::const_new();
-
-// Get pool instance
-async fn get_producer_pool() -> &'static ProducerPool {
-    PRODUCER_POOL
-        .get_or_init(|| async {
-            Pool::builder(ProducerManager)
-                .max_size(5) // Maximum number of connections
-                .build()
-                .expect("Failed to create producer pool")
-        })
-        .await
-}
-
-// Send message using connection pool
-async fn send_message(topic: &str, message: &str) -> Result<()> {
-    let pool = get_producer_pool().await;
-    let producer = pool.get().await.map_err(|e| anyhow::anyhow!("{}", e))?;
-    
-    producer.publish(topic, message.as_bytes()).await.map_err(|e| anyhow::anyhow!("{}", e))?;
-    Ok(())
-}
-
-// Concurrent message sending example
-async fn send_messages_concurrently() -> Result<()> {
-    let topic = "test_topic";
-    let mut tasks = Vec::new();
-    
-    for i in 0..10 {
-        let message = format!("Message #{}", i);
-        let handle = tokio::spawn(async move {
-            match send_message(topic, &message).await {
-                Ok(_) => info!("Successfully sent message: {}", message),
-                Err(e) => error!("Failed to send message: {}", e),
-            }
-        });
-        tasks.push(handle);
-    }
-    
-    for task in tasks {
-        task.await.unwrap();
-    }
-    
-    Ok(())
-}
-```
-
-The Deadpool connection pool provides:
-- Automatic connection management
-- Connection health checks
-- Connection recycling
-- Concurrent access support
-- Configurable pool size
-- Built-in metrics
 
 ## Contributing
 
@@ -431,21 +313,4 @@ Contributions are welcome! Please feel free to submit issues and pull requests.
 
 ## License
 
-MIT License
-
-## Implementation Notes
-
-This project was designed and implemented with reference to NSQ's official Go client library [go-nsq](https://github.com/nsqio/go-nsq), including:
-
-- Message processing flow
-- Connection management mechanisms
-- Error handling strategies
-- Configuration parameter design
-- Graceful shutdown mechanism
-
-While maintaining functional parity with go-nsq, we've fully leveraged Rust language features to provide:
-
-- Stricter type safety
-- Asynchronous support based on tokio
-- Rust-style error handling
-- Improved memory safety guarantees 
+MIT License 

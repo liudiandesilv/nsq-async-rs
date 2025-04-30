@@ -9,7 +9,6 @@ use tokio::sync::RwLock;
 
 use crate::commands::{create_nsqd_connection, lookup_nsqd_nodes};
 use crate::connection::Connection;
-use crate::connection_pool::ConnectionPool;
 use crate::error::{Error, Result};
 use crate::protocol::{Command, Frame, IdentifyConfig, ProtocolError};
 
@@ -87,25 +86,17 @@ pub trait Producer: Send + Sync {
         topic: &str,
         messages: Vec<T>,
     ) -> Result<()>;
-    
+
     /// 发送 ping 命令检测连接状态
-    /// 
+    ///
     /// # 参数
     /// * `addr` - 要 ping 的 NSQ 服务器地址，如果为 None，则使用配置中的第一个地址
     /// * `timeout` - 超时时间，默认为 5 秒
-    /// 
+    ///
     /// # 返回
     /// * `Ok(())` - 如果连接正常
     /// * `Err(Error)` - 如果连接异常或超时
     async fn ping(&self, addr: Option<&str>, timeout: Option<Duration>) -> Result<()>;
-
-    /// 设置外部连接池 - 返回原始类型，不能直接使用
-    fn with_connection_pool(self, _pool: Arc<ConnectionPool>) -> Self
-    where
-        Self: Sized,
-    {
-        self
-    }
 }
 
 /// NSQ生产者实现
@@ -114,8 +105,6 @@ pub struct NsqProducer {
     config: ProducerConfig,
     /// 内部连接池
     connections: RwLock<HashMap<String, Arc<Connection>>>,
-    /// 外部连接池（可选）
-    external_pool: Option<Arc<ConnectionPool>>,
 }
 
 impl NsqProducer {
@@ -124,30 +113,11 @@ impl NsqProducer {
         Self {
             config,
             connections: RwLock::new(HashMap::new()),
-            external_pool: None,
         }
-    }
-
-    /// 设置外部连接池
-    pub fn with_connection_pool(mut self, pool: Arc<ConnectionPool>) -> Self {
-        self.external_pool = Some(pool);
-        self
     }
 
     /// 获取或创建到NSQ服务器的连接
     async fn get_or_create_connection(&self, addr: &str) -> Result<Arc<Connection>> {
-        // 优先使用外部连接池（如果提供了）
-        if let Some(pool) = &self.external_pool {
-            debug!("使用外部连接池获取连接: {}", addr);
-            return pool
-                .get_connection(
-                    addr,
-                    self.config.identify_config.clone(),
-                    self.config.auth_secret.clone(),
-                )
-                .await;
-        }
-
         // 尝试从内部连接池获取连接
         let connections = self.connections.read().await;
         if let Some(connection) = connections.get(addr) {
@@ -210,7 +180,9 @@ impl Producer for NsqProducer {
                 } else if !self.config.nsqlookupd_addresses.is_empty() {
                     // 如果没有直接的 nsqd 地址，尝试从 nsqlookupd 获取
                     // 使用一个特殊的主题名仅用于 ping 目的
-                    let nsqd_nodes = lookup_nsqd_nodes(&self.config.nsqlookupd_addresses[0], "_ping_topic").await?;
+                    let nsqd_nodes =
+                        lookup_nsqd_nodes(&self.config.nsqlookupd_addresses[0], "_ping_topic")
+                            .await?;
                     if nsqd_nodes.is_empty() {
                         return Err(Error::Connection("没有可用的 NSQ 服务器地址".to_string()));
                     }

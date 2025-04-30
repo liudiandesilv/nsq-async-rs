@@ -1,9 +1,5 @@
 use log::{info, warn};
-use nsq_async_rs::{
-    connection_pool::{create_connection_pool, ConnectionPoolConfig},
-    producer::new_producer,
-    Producer, ProducerConfig,
-};
+use nsq_async_rs::{producer::new_producer, Producer, ProducerConfig};
 use std::sync::Arc;
 use std::time::Instant;
 use std::{error::Error, time::Duration};
@@ -18,18 +14,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     info!("start pub single msg...");
 
-    let pool_config = ConnectionPoolConfig {
-        max_connections_per_host: 20,
-        ..Default::default()
-    };
-    let pool = create_connection_pool(pool_config);
-
     let p_cfg = ProducerConfig {
         nsqd_addresses: vec!["127.0.0.1:4150".to_string()],
         ..Default::default()
     };
 
-    let producer = new_producer(p_cfg);
+    let producer = Arc::new(new_producer(p_cfg));
 
     //ping
     let res = producer.ping(None, Some(Duration::from_millis(500))).await;
@@ -41,9 +31,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         //异常退出
     }
 
-    let producer = Arc::new(producer.with_connection_pool(pool));
-
-    // 预热连接池
+    // 预热
+    let topic = "test_topic";
+    let _ = producer.publish(topic, "warmup").await;
 
     let mut handlers = vec![];
 
@@ -78,11 +68,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // 使用同步方式测试发送消息
     // 直接复用已初始化的全局生产者
     let producer = producer.clone();
-
-    // 预热
-    let topic = "test_topic";
-    // 使用trait方法
-    let _ = producer.publish(topic, "warmup").await;
 
     for i in 1..=10 {
         let start = Instant::now();
@@ -148,13 +133,7 @@ mod pub_test {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(500));
         let topic = "test_interval";
 
-        let pool_config = ConnectionPoolConfig {
-            max_connections_per_host: 20,
-            ..Default::default()
-        };
-        let pool = create_connection_pool(pool_config);
-
-        let producer = Arc::new(new_producer(ProducerConfig::default()).with_connection_pool(pool));
+        let producer = Arc::new(new_producer(ProducerConfig::default()));
 
         let mut i = 1;
         loop {

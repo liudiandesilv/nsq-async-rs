@@ -4,7 +4,6 @@
 // 导出模块
 pub mod commands;
 pub mod connection;
-pub mod connection_pool;
 pub mod consumer;
 pub mod error;
 pub mod lookup;
