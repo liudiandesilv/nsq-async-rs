@@ -27,7 +27,7 @@ Add the following to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-nsq-async-rs = "0.1.5"
+nsq-async-rs = "0.1.6"
 ```
 
 ## Quick Start
