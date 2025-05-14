@@ -1,3 +1,4 @@
+use log::warn;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -21,6 +22,13 @@ pub enum PoolError {
     PingConnection(String),
 }
 
+/// 带有创建时间的连接包装
+#[derive(Clone)]
+pub struct PooledConn<T> {
+    pub conn: Arc<T>,
+    pub created_time: Instant,
+}
+
 pub type Result<T> = std::result::Result<T, PoolError>;
 
 /// 连接池配置
@@ -30,6 +38,7 @@ pub struct PoolConfig {
     pub max_cap: usize,         // 最大连接数
     pub max_idle: usize,        // 最大空闲连接
     pub idle_timeout: Duration, // 空闲超时时间
+    pub max_lifetime: Duration, // 连接最大生命周期
 }
 
 impl Default for PoolConfig {
@@ -39,6 +48,7 @@ impl Default for PoolConfig {
             max_cap: 20,
             max_idle: 10,
             idle_timeout: Duration::from_secs(30),
+            max_lifetime: Duration::from_secs(300), // 5分钟的连接生命周期
         }
     }
 }
@@ -46,12 +56,13 @@ impl Default for PoolConfig {
 /// 空闲连接包装
 struct IdleConn<T> {
     conn: Arc<T>,
-    t: Instant,
+    idle_time: Instant,   // 空闲时间（最后一次归还时间）
+    created_time: Instant, // 创建时间
 }
 
 /// 连接请求
 struct ConnRequest<T> {
-    sender: oneshot::Sender<Result<Arc<T>>>,
+    sender: oneshot::Sender<Result<PooledConn<T>>>,
 }
 
 /// 通用连接池
@@ -97,7 +108,8 @@ impl<T: Send + Sync + 'static> Pool<T> {
             let mut conns = pool.idle_conns.lock().await;
             conns.push_back(IdleConn {
                 conn: Arc::new(conn),
-                t: Instant::now(),
+                idle_time: Instant::now(),
+                created_time: Instant::now(), // 创建时记录创建时间
             });
             let mut count = pool.opening_conns.lock().await;
             *count += 1;
@@ -120,7 +132,7 @@ impl<T: Send + Sync + 'static> Pool<T> {
         for i in (0..conns.len()).rev() {
             let idle_conn = &conns[i];
             if self.config.idle_timeout > Duration::from_secs(0)
-                && idle_conn.t.elapsed() > self.config.idle_timeout
+                && idle_conn.idle_time.elapsed() > self.config.idle_timeout
             {
                 // 关闭超时连接
                 if let Err(e) = (self.closer)(&idle_conn.conn) {
@@ -136,7 +148,7 @@ impl<T: Send + Sync + 'static> Pool<T> {
     }
 
     /// 获取连接
-    pub async fn get(&self) -> Result<Arc<T>> {
+    pub async fn get(&self) -> Result<PooledConn<T>> {
         if *self.closed.lock().await {
             return Err(PoolError::Closed);
         }
@@ -146,23 +158,40 @@ impl<T: Send + Sync + 'static> Pool<T> {
             let mut conns = self.idle_conns.lock().await;
             while let Some(idle_conn) = conns.pop_front() {
                 // 检查是否超时
+                // 检查空闲超时
                 if self.config.idle_timeout > Duration::from_secs(0)
-                    && idle_conn.t.elapsed() > self.config.idle_timeout
+                    && idle_conn.idle_time.elapsed() > self.config.idle_timeout
                 {
                     // 关闭并丢弃超时连接
                     if let Err(e) = (self.closer)(&idle_conn.conn) {
-                        return Err(PoolError::CloseConnection(e));
+                        warn!("close timeout conn err: {}", e);
+                        // 只记录错误，不中断获取连接流程
                     }
                     let mut count = self.opening_conns.lock().await;
                     *count -= 1;
                     continue;
                 }
 
+                // 检查连接生命周期
+                if self.config.max_lifetime > Duration::from_secs(0)
+                    && idle_conn.created_time.elapsed() > self.config.max_lifetime
+                {
+                    // 关闭并丢弃超过生命周期的连接
+                    if let Err(e) = (self.closer)(&idle_conn.conn) {
+                        warn!("close lifetime exceeded conn err: {}", e);
+                        // 只记录错误，不中断获取连接流程
+                    }
+                    let mut count = self.opening_conns.lock().await;
+                    *count -= 1;
+                    continue;
+                }
+                
                 // 检查连接是否有效
                 if let Some(pinger) = &self.pinger {
-                    if let Err(e) = pinger(&idle_conn.conn) {
+                    if let Err(_) = pinger(&idle_conn.conn) {
                         if let Err(e) = (self.closer)(&idle_conn.conn) {
-                            return Err(PoolError::CloseConnection(e));
+                            warn!("关闭无效连接失败: {}", e);
+                            // 只记录错误，不中断获取连接流程
                         }
                         let mut count = self.opening_conns.lock().await;
                         *count -= 1;
@@ -170,7 +199,10 @@ impl<T: Send + Sync + 'static> Pool<T> {
                     }
                 }
 
-                return Ok(idle_conn.conn);
+                return Ok(PooledConn {
+                    conn: idle_conn.conn,
+                    created_time: idle_conn.created_time,
+                });
             }
         }
 
@@ -194,7 +226,10 @@ impl<T: Send + Sync + 'static> Pool<T> {
             match (self.factory)() {
                 Ok(conn) => {
                     *count += 1;
-                    Ok(Arc::new(conn))
+                    Ok(PooledConn {
+                        conn: Arc::new(conn),
+                        created_time: Instant::now(),
+                    })
                 }
                 Err(e) => Err(e),
             }
@@ -202,7 +237,9 @@ impl<T: Send + Sync + 'static> Pool<T> {
     }
 
     /// 归还连接
-    pub async fn put(&self, conn: Arc<T>) -> Result<()> {
+    pub async fn put(&self, pooled_conn: PooledConn<T>) -> Result<()> {
+        let conn = pooled_conn.conn;
+        let created_time = pooled_conn.created_time;
         if Arc::strong_count(&conn) == 0 {
             return Err(PoolError::NilConnection);
         }
@@ -211,18 +248,20 @@ impl<T: Send + Sync + 'static> Pool<T> {
             return Ok(());
         }
 
-        // 检查是否已经超时
-        if self.config.idle_timeout > Duration::from_secs(0) {
-            let elapsed = Instant::now() - Instant::now(); // 这里需要记录连接的创建时间
-            if elapsed > self.config.idle_timeout {
-                // 连接已超时，关闭连接并减少计数
-                if let Err(e) = (self.closer)(&conn) {
-                    return Err(PoolError::CloseConnection(e));
-                }
-                let mut count = self.opening_conns.lock().await;
-                *count -= 1;
-                return Ok(());
+        // 首先检查连接生命周期，如果超过最大生命周期，直接关闭
+        if self.config.max_lifetime > Duration::from_secs(0)
+            && created_time.elapsed() > self.config.max_lifetime
+        {
+            // 记录并关闭超过生命周期的连接
+            warn!("连接生命周期已超过最大限制 ({:?})，直接关闭而非放回连接池", 
+                  self.config.max_lifetime);
+            
+            if let Err(e) = (self.closer)(&conn) {
+                warn!("关闭过期连接失败: {}", e);
             }
+            let mut count = self.opening_conns.lock().await;
+            *count -= 1;
+            return Ok(());
         }
 
         // 检查是否有等待的连接请求
@@ -230,10 +269,13 @@ impl<T: Send + Sync + 'static> Pool<T> {
         if let Some(req) = reqs.pop() {
             drop(reqs);
             let conn_clone = Arc::clone(&conn);
-            if let Err(_) = req.sender.send(Ok(conn_clone)) {
+            if let Err(_) = req.sender.send(Ok(PooledConn {
+                conn: conn_clone,
+                created_time,
+            })) {
                 // 如果发送失败，说明接收方已经取消等待，关闭连接
                 if let Err(e) = (self.closer)(&conn) {
-                    return Err(PoolError::CloseConnection(e));
+                    warn!("close timeout conn err: {}", e);
                 }
                 let mut count = self.opening_conns.lock().await;
                 *count -= 1;
@@ -243,9 +285,11 @@ impl<T: Send + Sync + 'static> Pool<T> {
 
         let mut conns = self.idle_conns.lock().await;
         if conns.len() < self.config.max_idle {
+            // 归还连接到连接池，更新空闲时间，保留创建时间
             conns.push_back(IdleConn {
                 conn,
-                t: Instant::now(),
+                idle_time: Instant::now(),
+                created_time, // 使用原始的创建时间
             });
             Ok(())
         } else {

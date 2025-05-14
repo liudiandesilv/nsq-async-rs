@@ -69,3 +69,7 @@ path = "examples/pub/publish.rs"
 [[example]]
 name = "pub_with_deadpool"
 path = "examples/pub/pub_with_deadpool.rs"
+
+[[example]]
+name = "pool_producer"
+path = "examples/pub/pool_producer.rs"
