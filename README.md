@@ -18,6 +18,7 @@ nsq-async-rs is a high-performance, reliable NSQ client library written in Rust.
 - ⚡ Support for delayed publishing
 - 📦 Support for batch publishing
 - 🔀 Support for concurrent message processing
+- 🏊‍♂️ Built-in connection pool for producers
 - 💫 Feature parity with official go-nsq
 
 ## Installation
@@ -209,6 +210,66 @@ async fn main() -> Result<()> {
 }
 ```
 
+### Producer with Connection Pool Example
+
+```rust
+use log::{error, info};
+use nsq_async_rs::{
+    producer::{new_producer, NsqProducer},
+    Producer, ProducerConfig,
+};
+use std::error::Error;
+use std::time::Duration;
+use nsq_async_rs::pool::{Pool, PoolConfig, PoolError};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
+    // Configure the connection pool
+    let pool_config = PoolConfig {
+        initial_cap: 3,            // Initial connections
+        max_cap: 10,               // Maximum connections
+        max_idle: 5,               // Maximum idle connections
+        idle_timeout: Duration::from_secs(30),  // Idle timeout
+        max_lifetime: Duration::from_secs(300), // Connection lifetime (5 minutes)
+    };
+
+    // Create NSQ producer connection pool
+    let pool = Pool::new(
+        pool_config,
+        // Factory function to create new connections
+        || {
+            let p_cfg = ProducerConfig {
+                nsqd_addresses: vec!["127.0.0.1:4150".to_string()],
+                ..Default::default()
+            };
+            Ok(new_producer(p_cfg))
+        },
+        // Close function (NSQ producers don't need explicit closing)
+        |_producer| Ok(()),
+        // Optional ping function to check connection health
+        Some(|_producer| Ok(())),
+    ).await?;
+
+    // Get a connection from the pool
+    let topic = "test_topic";
+    let pooled_conn = pool.get().await?;
+    
+    // Use the connection
+    match pooled_conn.conn.publish(topic, "Hello from connection pool!").await {
+        Ok(_) => info!("Message published successfully"),
+        Err(e) => error!("Failed to publish message: {}", e),
+    }
+    
+    // Return the connection to the pool
+    pool.put(pooled_conn).await?;
+    
+    // Close the pool when done
+    pool.release().await?;
+    
+    Ok(())
+}
+```
+
 ### Batch Publishing Example
 
 ```rust
@@ -266,6 +327,18 @@ ConsumerConfig {
     default_requeue_delay: Duration::from_secs(90),  // Default requeue delay
     shutdown_timeout: Duration::from_secs(30),       // Shutdown timeout
     backoff_strategy: true,                // Enable exponential backoff reconnection strategy
+}
+```
+
+### Connection Pool Configuration
+
+```rust
+PoolConfig {
+    initial_cap: 5,                    // Initial connections to create
+    max_cap: 20,                       // Maximum connections allowed
+    max_idle: 10,                      // Maximum idle connections to keep
+    idle_timeout: Duration::from_secs(30), // How long connections can remain idle
+    max_lifetime: Duration::from_secs(300), // Maximum connection lifetime (5 minutes)
 }
 ```
 

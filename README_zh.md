@@ -18,6 +18,7 @@ nsq-async-rs 是一个用 Rust 编写的高性能、可靠的 NSQ 客户端库�
 - ⚡ 支持延迟发布
 - 📦 支持批量发布
 - 🔀 支持并发消息处理
+- 🏊‍♂️ 内置生产者连接池
 - 💫 与官方 go-nsq 保持一致的功能特性
 
 ## 安装
@@ -209,6 +210,66 @@ async fn main() -> Result<()> {
 }
 ```
 
+### 使用连接池的生产者示例
+
+```rust
+use log::{error, info};
+use nsq_async_rs::{
+    producer::{new_producer, NsqProducer},
+    Producer, ProducerConfig,
+};
+use std::error::Error;
+use std::time::Duration;
+use nsq_async_rs::pool::{Pool, PoolConfig, PoolError};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
+    // 配置连接池
+    let pool_config = PoolConfig {
+        initial_cap: 3,            // 初始连接数
+        max_cap: 10,               // 最大连接数
+        max_idle: 5,               // 最大空闲连接
+        idle_timeout: Duration::from_secs(30),  // 空闲超时时间
+        max_lifetime: Duration::from_secs(300), // 连接最大生命周期（5分钟）
+    };
+
+    // 创建 NSQ 生产者连接池
+    let pool = Pool::new(
+        pool_config,
+        // 创建连接的工厂函数
+        || {
+            let p_cfg = ProducerConfig {
+                nsqd_addresses: vec!["127.0.0.1:4150".to_string()],
+                ..Default::default()
+            };
+            Ok(new_producer(p_cfg))
+        },
+        // 关闭连接的函数（NSQ 生产者不需要显式关闭）
+        |_producer| Ok(()),
+        // 可选的连接检查函数
+        Some(|_producer| Ok(())),
+    ).await?;
+
+    // 从连接池获取一个连接
+    let topic = "test_topic";
+    let pooled_conn = pool.get().await?;
+    
+    // 使用连接
+    match pooled_conn.conn.publish(topic, "来自连接池的消息！").await {
+        Ok(_) => info!("消息发布成功"),
+        Err(e) => error!("消息发布失败: {}", e),
+    }
+    
+    // 归还连接到连接池
+    pool.put(pooled_conn).await?;
+    
+    // 使用完毕后关闭连接池
+    pool.release().await?;
+    
+    Ok(())
+}
+```
+
 ### 批量发布示例
 
 ```rust
@@ -266,6 +327,18 @@ ConsumerConfig {
     default_requeue_delay: Duration::from_secs(90),  // 默认重新入队延迟
     shutdown_timeout: Duration::from_secs(30),       // 关闭超时
     backoff_strategy: true,                // 启用指数退避重连策略
+}
+```
+
+### 连接池配置
+
+```rust
+PoolConfig {
+    initial_cap: 5,                    // 初始连接数
+    max_cap: 20,                       // 最大连接数
+    max_idle: 10,                      // 最大空闲连接数
+    idle_timeout: Duration::from_secs(30), // 连接空闲超时时间
+    max_lifetime: Duration::from_secs(300), // 连接最大生命周期（5分钟）
 }
 ```
 
