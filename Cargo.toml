@@ -1,7 +1,7 @@
 [package]
 name = "nsq-async-rs"
-version = "0.1.6"   
-edition = "2021"
+version = "0.1.7"
+edition = "2024"
 description = "An asynchronous Rust NSQ client library with support for concurrent message processing"
 authors = ["liudiansilv@gmail.com"]
 repository = "https://github.com/liudiandesilv/nsq-async-rs"
