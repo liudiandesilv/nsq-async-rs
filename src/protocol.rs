@@ -1,6 +1,8 @@
 use byteorder::{BigEndian, ByteOrder, ReadBytesExt, WriteBytesExt};
 use serde::{Deserialize, Serialize};
 use std::io::{Cursor, Read};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
 
 use crate::error::{Error, Result};
@@ -135,9 +137,132 @@ pub struct Message {
     pub attempts: u16,
     /// 消息体
     pub body: Vec<u8>,
+    /// 连接引用（用于手动确认）
+    #[allow(dead_code)]
+    connection: Option<Arc<MessageResponder>>,
+    /// 是否禁用自动响应
+    auto_response_disabled: bool,
+    /// 是否已经响应
+    responded: Arc<AtomicBool>,
+}
+
+/// 消息响应器 - 用于手动确认消息
+#[derive(Debug)]
+pub struct MessageResponder {
+    connection: Arc<crate::connection::Connection>,
+    msg_id: String,
+}
+
+impl MessageResponder {
+    /// 创建新的消息响应器
+    pub fn new(connection: Arc<crate::connection::Connection>, msg_id: String) -> Self {
+        Self { connection, msg_id }
+    }
+
+    /// 发送 FIN 命令，标记消息处理完成
+    pub async fn finish(&self) -> Result<()> {
+        let cmd = Command::Finish(self.msg_id.clone());
+        self.connection.send_command(cmd).await
+    }
+
+    /// 发送 REQ 命令，重新入队消息
+    pub async fn requeue(&self, delay: u32) -> Result<()> {
+        let cmd = Command::Requeue(self.msg_id.clone(), delay);
+        self.connection.send_command(cmd).await
+    }
+
+    /// 发送 TOUCH 命令，重置消息超时
+    pub async fn touch(&self) -> Result<()> {
+        let cmd = Command::Touch(self.msg_id.clone());
+        self.connection.send_command(cmd).await
+    }
 }
 
 impl Message {
+    /// 创建新消息（用于测试）
+    pub fn new(id: Vec<u8>, body: Vec<u8>, timestamp: u64, attempts: u16) -> Self {
+        Self {
+            id,
+            timestamp,
+            attempts,
+            body,
+            connection: None,
+            auto_response_disabled: false,
+            responded: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// 设置消息响应器
+    pub fn with_responder(mut self, connection: Arc<crate::connection::Connection>) -> Self {
+        let msg_id = String::from_utf8_lossy(&self.id).to_string();
+        self.connection = Some(Arc::new(MessageResponder::new(connection, msg_id)));
+        self
+    }
+
+    /// 禁用自动响应
+    ///
+    /// 调用此方法后，消息不会自动发送 FIN/REQ，需要手动调用 finish() 或 requeue()
+    pub fn disable_auto_response(&mut self) {
+        self.auto_response_disabled = true;
+    }
+
+    /// 检查是否禁用了自动响应
+    pub fn is_auto_response_disabled(&self) -> bool {
+        self.auto_response_disabled
+    }
+
+    /// 检查消息是否已经响应
+    pub fn has_responded(&self) -> bool {
+        self.responded.load(Ordering::SeqCst)
+    }
+
+    /// 手动发送 FIN 命令
+    pub async fn finish(&self) -> Result<()> {
+        // 使用 CAS 确保只响应一次
+        if self
+            .responded
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err()
+        {
+            return Ok(()); // 已经响应过了
+        }
+
+        if let Some(responder) = &self.connection {
+            responder.finish().await
+        } else {
+            Err(Error::Other("消息没有关联的连接".to_string()))
+        }
+    }
+
+    /// 手动发送 REQ 命令
+    pub async fn requeue(&self, delay: u32) -> Result<()> {
+        // 使用 CAS 确保只响应一次
+        if self
+            .responded
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err()
+        {
+            return Ok(()); // 已经响应过了
+        }
+
+        if let Some(responder) = &self.connection {
+            responder.requeue(delay).await
+        } else {
+            Err(Error::Other("消息没有关联的连接".to_string()))
+        }
+    }
+
+    /// 手动发送 TOUCH 命令
+    pub async fn touch(&self) -> Result<()> {
+        if self.has_responded() {
+            return Ok(()); // 已经响应过了，不能再 touch
+        }
+
+        if let Some(responder) = &self.connection {
+            responder.touch().await
+        } else {
+            Err(Error::Other("消息没有关联的连接".to_string()))
+        }
+    }
+
     /// 从字节流解析消息
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         if bytes.len() < 26 {
@@ -180,7 +305,15 @@ impl Message {
             timestamp,
             attempts,
             body,
+            connection: None,
+            auto_response_disabled: false,
+            responded: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    /// 获取消息ID的字符串表示
+    pub fn id_string(&self) -> String {
+        String::from_utf8_lossy(&self.id).to_string()
     }
 }
 
@@ -363,6 +496,9 @@ impl Protocol {
             attempts,
             id,
             body,
+            connection: None,
+            auto_response_disabled: false,
+            responded: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -453,9 +589,9 @@ mod tests {
     #[test]
     fn test_publish_command() {
         let topic = "test_topic".to_string();
-        let message = b"test message".to_vec();
+        let msg_body = b"test message".to_vec();
 
-        let cmd = Command::Publish(topic, message.clone());
+        let cmd = Command::Publish(topic, msg_body.clone());
         let bytes = cmd.to_bytes().unwrap();
 
         // 验证命令前缀
@@ -465,9 +601,25 @@ mod tests {
         let message_size_bytes = &bytes[15..19];
         let mut cursor = Cursor::new(message_size_bytes);
         let message_size = cursor.read_u32::<BigEndian>().unwrap();
-        assert_eq!(message_size as usize, message.len());
+        assert_eq!(message_size as usize, msg_body.len());
 
         let actual_message = &bytes[19..];
-        assert_eq!(actual_message, message.as_slice());
+        assert_eq!(actual_message, msg_body.as_slice());
+    }
+
+    #[test]
+    fn test_message_creation() {
+        let msg = Message::new(
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+            b"test body".to_vec(),
+            123456789,
+            1,
+        );
+
+        assert_eq!(msg.attempts, 1);
+        assert_eq!(msg.timestamp, 123456789);
+        assert_eq!(msg.body, b"test body");
+        assert!(!msg.is_auto_response_disabled());
+        assert!(!msg.has_responded());
     }
 }

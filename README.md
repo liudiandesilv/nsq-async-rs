@@ -19,6 +19,7 @@ nsq-async-rs is a high-performance, reliable NSQ client library written in Rust.
 - 📦 Support for batch publishing
 - 🔀 Support for concurrent message processing
 - 🏊‍♂️ Built-in connection pool for producers
+- 🎯 **Manual message acknowledgement support**
 - 💫 Feature parity with official go-nsq
 
 ## Installation
@@ -379,6 +380,170 @@ let messages = vec![
 ];
 producer.publish_multiple("test_topic", messages).await?;
 ```
+
+## Manual Message Acknowledgement
+
+nsq-async-rs supports manual message acknowledgement, giving you full control over when messages are acknowledged. This is particularly useful for concurrent processing, batch processing, or complex error handling scenarios.
+
+### When to Use Manual Acknowledgement
+
+Manual acknowledgement is ideal for:
+
+1. **Concurrent message processing** - When you need to send messages to a worker thread pool for async processing
+2. **Batch processing** - Accumulating multiple messages before processing them together
+3. **Complex error handling** - Deciding whether to retry or discard based on different error types
+4. **Long-running processing** - Using `TOUCH` to extend timeout for messages that take longer to process
+
+### Enabling Manual Acknowledgement
+
+```rust
+let config = ConsumerConfig {
+    max_in_flight: 100,
+    disable_auto_response: true, // Enable manual acknowledgement
+    ..Default::default()
+};
+```
+
+### Manual Acknowledgement API
+
+```rust
+#[async_trait]
+impl Handler for MyHandler {
+    async fn handle_message(&self, message: Message) -> Result<()> {
+        // Send to worker thread for async processing
+        self.worker_tx.send(message).await?;
+        
+        // Return Ok, but won't auto-FIN (because manual ack is enabled)
+        Ok(())
+    }
+}
+
+// In worker thread
+async fn worker(message: Message) {
+    match process_message(&message.body).await {
+        Ok(_) => {
+            // Manually send FIN
+            message.finish().await.unwrap();
+        }
+        Err(_) => {
+            // Manually requeue with 5 second delay
+            message.requeue(5000).await.unwrap();
+        }
+    }
+}
+```
+
+### API Methods
+
+- `message.finish()` - Send FIN command to mark message as successfully processed
+- `message.requeue(delay)` - Send REQ command to requeue the message with a delay (in milliseconds)
+- `message.touch()` - Send TOUCH command to reset message timeout
+- `message.disable_auto_response()` - Disable auto-response for a specific message
+
+### Complete Example
+
+Here's a complete example showing manual acknowledgement with concurrent message processing:
+
+```rust
+use async_trait::async_trait;
+use nsq_async_rs::consumer::{Consumer, ConsumerConfig, Handler};
+use nsq_async_rs::protocol::Message;
+use tokio::sync::mpsc;
+
+struct ConcurrentHandler {
+    worker_tx: mpsc::Sender<Message>,
+}
+
+impl ConcurrentHandler {
+    fn new(worker_count: usize) -> Self {
+        let (tx, mut rx) = mpsc::channel(100);
+        
+        // Start worker threads
+        for worker_id in 0..worker_count {
+            let mut worker_rx = rx.clone();
+            tokio::spawn(async move {
+                while let Some(msg) = worker_rx.recv().await {
+                    // Process message
+                    match process_message(&msg.body).await {
+                        Ok(_) => {
+                            msg.finish().await.ok();
+                        }
+                        Err(_) => {
+                            if msg.attempts < 3 {
+                                msg.requeue(5000).await.ok();
+                            } else {
+                                msg.finish().await.ok(); // Give up retrying
+                            }
+                        }
+                    }
+                }
+            });
+        }
+        
+        Self { worker_tx: tx }
+    }
+}
+
+#[async_trait]
+impl Handler for ConcurrentHandler {
+    async fn handle_message(&self, message: Message) -> Result<()> {
+        self.worker_tx.send(message).await?;
+        Ok(())
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let config = ConsumerConfig {
+        max_in_flight: 100,
+        disable_auto_response: true, // Enable manual acknowledgement
+        ..Default::default()
+    };
+    
+    let handler = ConcurrentHandler::new(20);
+    let consumer = Consumer::new("topic", "channel", config, handler)?;
+    
+    consumer.connect_to_nsqlookupd("http://127.0.0.1:4161").await?;
+    consumer.start().await?;
+    
+    tokio::signal::ctrl_c().await?;
+    consumer.stop().await?;
+    
+    Ok(())
+}
+```
+
+### Running Examples
+
+```bash
+# Run manual acknowledgement example
+cargo run --example manual_ack_consume
+
+# Run automatic acknowledgement example (for comparison)
+cargo run --example simple_consume
+```
+
+### Best Practices
+
+1. **Ensure every message is acknowledged** - Use proper error handling to guarantee messages are acknowledged even when processing fails
+2. **Set appropriate `max_in_flight`** - Can be set higher (e.g., 100) with manual ack, but ensure it doesn't exceed worker capacity
+3. **Handle retry logic** - Check `message.attempts` to avoid infinite retries and use exponential backoff
+4. **Avoid deadlocks** - Ensure message channels have sufficient buffer and use `try_send` or timeout mechanisms
+5. **Monitor statistics** - Regularly call `consumer.stats()` to monitor `messages_received`, `messages_finished`, and `messages_requeued`
+
+### Troubleshooting
+
+**Message Timeout Issues**
+- Symptom: Messages keep retrying, `attempts` keeps increasing
+- Solution: Use `message.touch()` to reset timeout or increase `IdentifyConfig.msg_timeout`
+
+**Message Loss**
+- Symptom: Messages received but not processed
+- Solution: Ensure manual acknowledgement is properly called in all code paths
+
+**Memory Leaks**
+- Symptom: Memory usage continuously grows
+- Solution: Limit channel buffer size, monitor channel length, implement backpressure
 
 ## Contributing
 

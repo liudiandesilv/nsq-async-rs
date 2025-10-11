@@ -7,23 +7,26 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, mpsc};
 
-/// 并发消息处理器
-struct ConcurrentMessageHandler {
+/// 手动确认的并发消息处理器
+///
+/// 这个示例展示了如何使用手动确认来处理并发消息
+/// 消息会被发送到 worker 线程池异步处理，处理完成后手动确认
+struct ManualAckHandler {
     /// 工作线程数量
     worker_count: usize,
     /// 消息发送通道
     sender: Arc<Mutex<mpsc::Sender<Message>>>,
 }
 
-impl ConcurrentMessageHandler {
-    /// 创建新的并发消息处理器
+impl ManualAckHandler {
+    /// 创建新的手动确认处理器
     pub fn new(worker_count: usize) -> Self {
         // 创建消息通道，缓冲区大小为工作线程数量的 10 倍
         let (tx, rx) = mpsc::channel(worker_count * 10);
         let sender = Arc::new(Mutex::new(tx));
         let receiver = Arc::new(Mutex::new(rx));
 
-        // 创建并发处理器
+        // 创建处理器
         let handler = Self {
             worker_count,
             sender,
@@ -59,30 +62,52 @@ impl ConcurrentMessageHandler {
                     };
 
                     // 处理消息
-                    let msg_id = String::from_utf8_lossy(&msg.id).to_string();
-                    // info!("工作线程 {} 正在处理消息: ID={}", worker_id, msg_id);
+                    let msg_id = msg.id_string();
 
-                    //随机休眠 10ms - 500ms
-                    let sleep_time = rand::random::<u64>() % 400 + 10;
+                    // 随机休眠 10ms - 500ms 模拟处理时间
+                    let sleep_time = rand::random::<u64>() % 490 + 10;
                     tokio::time::sleep(Duration::from_millis(sleep_time)).await;
 
-                    // 实际的消息处理逻辑
-                    if msg.attempts > 3 {
-                        warn!(
-                            "工作线程 {} - 消息重试次数过多，将被丢弃: ID={}",
-                            worker_id, msg_id
-                        );
-                        continue;
-                    }
+                    // 模拟处理逻辑：30% 的概率失败
+                    let should_fail = rand::random::<f32>() < 0.3;
 
-                    info!(
-                        "工作线程 {} 使用 {}ms 处理消息 - ID: {}, 尝试次数: {}, 内容: {}",
-                        worker_id,
-                        sleep_time,
-                        msg_id,
-                        msg.attempts,
-                        String::from_utf8_lossy(&msg.body)
-                    );
+                    if should_fail {
+                        warn!(
+                            "工作线程 {} - 消息处理失败，重新入队: ID={}, 尝试次数: {}",
+                            worker_id, msg_id, msg.attempts
+                        );
+
+                        // 如果尝试次数超过 3 次，就不再重试
+                        if msg.attempts > 3 {
+                            warn!(
+                                "工作线程 {} - 消息重试次数过多，丢弃: ID={}",
+                                worker_id, msg_id
+                            );
+                            // 手动 FIN，表示不再处理
+                            if let Err(e) = msg.finish().await {
+                                error!("工作线程 {} - 发送 FIN 失败: {}", worker_id, e);
+                            }
+                        } else {
+                            // 手动 REQ，延迟 5 秒后重试
+                            if let Err(e) = msg.requeue(5000).await {
+                                error!("工作线程 {} - 发送 REQ 失败: {}", worker_id, e);
+                            }
+                        }
+                    } else {
+                        info!(
+                            "工作线程 {} 成功处理消息 (耗时 {}ms) - ID: {}, 尝试次数: {}, 内容: {}",
+                            worker_id,
+                            sleep_time,
+                            msg_id,
+                            msg.attempts,
+                            String::from_utf8_lossy(&msg.body)
+                        );
+
+                        // 手动 FIN
+                        if let Err(e) = msg.finish().await {
+                            error!("工作线程 {} - 发送 FIN 失败: {}", worker_id, e);
+                        }
+                    }
                 }
             });
         }
@@ -92,19 +117,19 @@ impl ConcurrentMessageHandler {
 }
 
 #[async_trait]
-impl Handler for ConcurrentMessageHandler {
+impl Handler for ManualAckHandler {
     async fn handle_message(&self, message: Message) -> Result<()> {
         // 记录消息接收
-        let msg_id = String::from_utf8_lossy(&message.id).to_string();
+        let msg_id = message.id_string();
 
-        // 将消息发送到通道，由工作线程处理
+        // 将消息发送到通道，由工作线程异步处理
         let sender = self.sender.lock().await;
 
         // 先尝试非阻塞方式发送
         let send_result = sender.try_send(message.clone());
         match send_result {
             Ok(_) => {
-                info!("消息已快速发送到工作线程通道: ID={}", msg_id);
+                info!("消息已发送到工作线程通道: ID={}", msg_id);
             }
             Err(mpsc::error::TrySendError::Full(msg)) => {
                 // 通道满了，使用阻塞方式发送
@@ -129,6 +154,7 @@ impl Handler for ConcurrentMessageHandler {
         }
 
         // 消息已发送到工作线程通道，返回成功
+        // 注意：由于启用了手动确认，这里返回 Ok 不会自动发送 FIN
         Ok(())
     }
 }
@@ -141,26 +167,18 @@ async fn main() -> Result<()> {
         .format_timestamp_millis()
         .init();
 
-    info!("正在初始化 NSQ 消费者...");
+    info!("正在初始化手动确认的 NSQ 消费者...");
 
     // 创建消费者配置
     let config = ConsumerConfig {
-        max_in_flight: 100, // 增加同时处理的最大消息数，确保有足够的消息可供并发处理
-        max_attempts: 5,    // 最大重试次数
-        dial_timeout: Duration::from_secs(1),
-        read_timeout: Duration::from_secs(60),
-        write_timeout: Duration::from_secs(1),
-        lookup_poll_interval: Duration::from_secs(60),
-        lookup_poll_jitter: 0.3,
-        max_requeue_delay: Duration::from_secs(15 * 60),
-        default_requeue_delay: Duration::from_secs(90),
-        shutdown_timeout: Duration::from_secs(30),
-        backoff_strategy: true,       // 启用指数退避重连策略
-        disable_auto_response: false, // 使用自动响应模式
+        max_in_flight: 100,          // 增加同时处理的最大消息数
+        max_attempts: 5,             // 最大重试次数
+        disable_auto_response: true, // 【关键】禁用自动响应，启用手动确认
+        ..Default::default()
     };
 
-    // 创建并发消息处理器，指定 20 个工作线程
-    let handler = ConcurrentMessageHandler::new(20);
+    // 创建手动确认的并发消息处理器，指定 20 个工作线程
+    let handler = ManualAckHandler::new(20);
 
     // 创建消费者实例
     let consumer = Consumer::new(
@@ -182,6 +200,7 @@ async fn main() -> Result<()> {
     consumer.start().await?;
 
     info!("消费者已启动，正在监听主题: test_topic");
+    info!("使用手动确认模式，消息会在 worker 线程中异步处理和确认");
     info!("按 Ctrl+C 停止消费者...");
 
     // 等待中断信号

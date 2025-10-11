@@ -1,5 +1,5 @@
 use log::{info, warn};
-use nsq_async_rs::{producer::new_producer, Producer, ProducerConfig};
+use nsq_async_rs::{Producer, ProducerConfig, producer::new_producer};
 use std::sync::Arc;
 use std::time::Instant;
 use std::{error::Error, time::Duration};

@@ -10,7 +10,7 @@ use tokio::sync::Mutex;
 use tokio::time::timeout;
 
 use crate::error::{Error, Result};
-use crate::protocol::{Command, Frame, IdentifyConfig, Message, Protocol, ProtocolError, MAGIC_V2};
+use crate::protocol::{Command, Frame, IdentifyConfig, MAGIC_V2, Message, Protocol, ProtocolError};
 
 /// TCP连接管理器
 #[derive(Debug)]
@@ -237,8 +237,7 @@ impl Connection {
                 frame_data.extend_from_slice(&frame_type_buf);
                 frame_data.extend_from_slice(&data);
 
-                Protocol::decode_frame(&frame_data).map_err(Error::from)
-            }
+                Protocol::decode_frame(&frame_data)}
             _ => Err(Error::Protocol(ProtocolError::InvalidFrameType(frame_type))),
         }
     }

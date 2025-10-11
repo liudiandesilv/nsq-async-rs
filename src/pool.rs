@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use thiserror::Error;
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{Mutex, oneshot};
 
 /// 连接池错误
 #[derive(Debug, Error)]
@@ -56,7 +56,7 @@ impl Default for PoolConfig {
 /// 空闲连接包装
 struct IdleConn<T> {
     conn: Arc<T>,
-    idle_time: Instant,   // 空闲时间（最后一次归还时间）
+    idle_time: Instant,    // 空闲时间（最后一次归还时间）
     created_time: Instant, // 创建时间
 }
 
@@ -185,10 +185,10 @@ impl<T: Send + Sync + 'static> Pool<T> {
                     *count -= 1;
                     continue;
                 }
-                
+
                 // 检查连接是否有效
-                if let Some(pinger) = &self.pinger {
-                    if let Err(_) = pinger(&idle_conn.conn) {
+                if let Some(pinger) = &self.pinger
+                    && pinger(&idle_conn.conn).is_err() {
                         if let Err(e) = (self.closer)(&idle_conn.conn) {
                             warn!("关闭无效连接失败: {}", e);
                             // 只记录错误，不中断获取连接流程
@@ -197,7 +197,6 @@ impl<T: Send + Sync + 'static> Pool<T> {
                         *count -= 1;
                         continue;
                     }
-                }
 
                 return Ok(PooledConn {
                     conn: idle_conn.conn,
@@ -253,9 +252,11 @@ impl<T: Send + Sync + 'static> Pool<T> {
             && created_time.elapsed() > self.config.max_lifetime
         {
             // 记录并关闭超过生命周期的连接
-            warn!("连接生命周期已超过最大限制 ({:?})，直接关闭而非放回连接池", 
-                  self.config.max_lifetime);
-            
+            warn!(
+                "连接生命周期已超过最大限制 ({:?})，直接关闭而非放回连接池",
+                self.config.max_lifetime
+            );
+
             if let Err(e) = (self.closer)(&conn) {
                 warn!("关闭过期连接失败: {}", e);
             }

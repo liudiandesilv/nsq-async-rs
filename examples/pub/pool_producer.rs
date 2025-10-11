@@ -1,7 +1,7 @@
-use log::{error, info, warn};
+use log::{error, info};
 use nsq_async_rs::{
-    producer::{new_producer, NsqProducer},
     Producer, ProducerConfig,
+    producer::{NsqProducer, new_producer},
 };
 use std::error::Error;
 use std::time::{Duration, Instant};
@@ -45,14 +45,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // 创建连接池配置
     let pool_config = PoolConfig {
-        initial_cap: 3,            // 初始连接数
-        max_cap: 10,               // 最大连接数
-        max_idle: 5,               // 最大空闲连接
-        idle_timeout: Duration::from_secs(30),  // 空闲超时时间
-        max_lifetime: Duration::from_secs(15),  // 连接最大生命周期 (15秒)
+        initial_cap: 3,                        // 初始连接数
+        max_cap: 10,                           // 最大连接数
+        max_idle: 5,                           // 最大空闲连接
+        idle_timeout: Duration::from_secs(30), // 空闲超时时间
+        max_lifetime: Duration::from_secs(15), // 连接最大生命周期 (15秒)
     };
 
-    info!("[测试配置] 连接生命周期设置为: {:?}", pool_config.max_lifetime);
+    info!(
+        "[测试配置] 连接生命周期设置为: {:?}",
+        pool_config.max_lifetime
+    );
 
     // 创建 NSQ 生产者连接池
     let pool = Pool::new(

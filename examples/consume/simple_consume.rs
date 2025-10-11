@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use log::{info, warn, LevelFilter};
+use log::{LevelFilter, info, warn};
 use nsq_async_rs::consumer::{Consumer, ConsumerConfig, Handler};
 use nsq_async_rs::error::Result;
 use nsq_async_rs::protocol::Message;

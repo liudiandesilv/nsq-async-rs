@@ -1,6 +1,6 @@
 use chrono::Local;
-use nsq_async_rs::producer::{new_producer, ProducerConfig};
 use nsq_async_rs::Producer;
+use nsq_async_rs::producer::{ProducerConfig, new_producer};
 use std::error::Error;
 use std::time::Instant;
 
