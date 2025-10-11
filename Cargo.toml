@@ -55,6 +55,10 @@ name = "simple_consume"
 path = "examples/consume/simple_consume.rs"
 
 [[example]]
+name = "manual_ack_consume"
+path = "examples/consume/manual_ack_consume.rs"
+
+[[example]]
 name = "pub_single"
 path = "examples/pub/pub_single.rs"
 

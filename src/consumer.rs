@@ -1,12 +1,12 @@
 use async_trait::async_trait;
 use log::{error, info};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::time::Duration;
 use thiserror::Error;
-use tokio::sync::mpsc;
 use tokio::sync::Mutex;
+use tokio::sync::mpsc;
 
 use crate::connection::Connection;
 use crate::error::{Error, Result};
@@ -32,6 +32,70 @@ pub struct Message {
     pub timestamp: u64,
 }
 
+/// 消息处理器 trait
+///
+/// 实现此 trait 来处理从 NSQ 接收的消息。
+///
+/// # 自动响应模式（默认）
+///
+/// 当 `ConsumerConfig::disable_auto_response` 为 `false` 时（默认）：
+/// - 如果 `handle_message` 返回 `Ok(())`，消息会自动发送 FIN 命令
+/// - 如果 `handle_message` 返回 `Err(_)`，消息会自动发送 REQ 命令
+///
+/// # 手动响应模式
+///
+/// 当 `ConsumerConfig::disable_auto_response` 为 `true` 时：
+/// - 消息不会自动发送 FIN/REQ
+/// - 需要在 handler 中手动调用：
+///   - `message.finish()` 完成消息处理
+///   - `message.requeue(delay)` 重新入队消息
+///   - `message.touch()` 重置消息超时
+///
+/// 或者，在自动响应模式下，也可以在单个消息上调用 `message.disable_auto_response()` 来禁用该消息的自动响应。
+///
+/// # 示例
+///
+/// ## 自动响应模式
+///
+/// ```rust,ignore
+/// struct MyHandler;
+///
+/// #[async_trait]
+/// impl Handler for MyHandler {
+///     async fn handle_message(&self, message: Message) -> Result<()> {
+///         // 处理消息
+///         println!("收到消息: {:?}", String::from_utf8_lossy(&message.body));
+///         
+///         // 返回 Ok 会自动发送 FIN
+///         Ok(())
+///     }
+/// }
+/// ```
+///
+/// ## 手动响应模式
+///
+/// ```rust,ignore
+/// struct MyHandler;
+///
+/// #[async_trait]
+/// impl Handler for MyHandler {
+///     async fn handle_message(&self, message: Message) -> Result<()> {
+///         // 处理消息
+///         match process(&message.body) {
+///             Ok(_) => {
+///                 // 手动发送 FIN
+///                 message.finish().await?;
+///             }
+///             Err(_) => {
+///                 // 手动重新入队，延迟 5 秒
+///                 message.requeue(5000).await?;
+///             }
+///         }
+///         
+///         Ok(())
+///     }
+/// }
+/// ```
 #[async_trait]
 pub trait Handler: Send + Sync + 'static {
     async fn handle_message(&self, message: ProtocolMessage) -> Result<()>;
@@ -58,6 +122,16 @@ pub struct ConsumerConfig {
     pub shutdown_timeout: Duration,
     /// 是否使用指数退避策略进行重连
     pub backoff_strategy: bool,
+    /// 是否禁用自动响应
+    ///
+    /// 当设置为 true 时，消息不会根据 Handler 的返回值自动发送 FIN/REQ
+    /// 需要在 Handler 中手动调用 message.finish() 或 message.requeue()
+    ///
+    /// 这对于以下场景很有用：
+    /// - 并发处理消息时需要异步确认
+    /// - 批量处理消息
+    /// - 需要精确控制消息确认时机
+    pub disable_auto_response: bool,
 }
 
 impl Default for ConsumerConfig {
@@ -74,6 +148,7 @@ impl Default for ConsumerConfig {
             default_requeue_delay: Duration::from_secs(90),
             shutdown_timeout: Duration::from_secs(30),
             backoff_strategy: true,
+            disable_auto_response: false,
         }
     }
 }
@@ -108,6 +183,7 @@ struct ConnectionHandler {
     messages_requeued: Arc<AtomicU64>,
     total_rdy_count: Arc<AtomicI32>,
     max_in_flight: Arc<AtomicI32>,
+    disable_auto_response: bool,
 }
 
 impl ConnectionHandler {
@@ -121,6 +197,7 @@ impl ConnectionHandler {
             messages_requeued: Arc::new(AtomicU64::new(0)),
             total_rdy_count: Arc::new(AtomicI32::new(0)),
             max_in_flight: Arc::new(AtomicI32::new(consumer.config.max_in_flight)),
+            disable_auto_response: consumer.config.disable_auto_response,
         }
     }
 
@@ -170,26 +247,44 @@ impl ConnectionHandler {
                         Ok(Frame::Message(msg)) => {
                             self.messages_received.fetch_add(1, Ordering::Relaxed);
 
+                            // 为消息附加连接引用（用于手动确认）
+                            let msg_with_conn = msg.with_responder(Arc::clone(&conn));
+
                             // 处理消息
-                            match self.handler.handle_message(msg.clone()).await {
+                            match self.handler.handle_message(msg_with_conn.clone()).await {
                                 Ok(_) => {
-                                    let msg_id = String::from_utf8_lossy(&msg.id).to_string();
-                                    let fin_cmd = Command::Finish(msg_id);
-                                    if let Err(e) = conn.send_command(fin_cmd).await {
-                                        error!("发送 FIN 命令失败: {}", e);
-                                        return Err(e);
-                                    } else {
+                                    // 检查是否需要自动响应
+                                    if !self.disable_auto_response && !msg_with_conn.is_auto_response_disabled() && !msg_with_conn.has_responded() {
+                                        // 自动发送 FIN
+                                        let msg_id = msg_with_conn.id_string();
+                                        let fin_cmd = Command::Finish(msg_id);
+                                        if let Err(e) = conn.send_command(fin_cmd).await {
+                                            error!("发送 FIN 命令失败: {}", e);
+                                            return Err(e);
+                                        } else {
+                                            self.messages_finished.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                    } else if msg_with_conn.has_responded() {
+                                        // 消息已经手动响应过了，更新统计
                                         self.messages_finished.fetch_add(1, Ordering::Relaxed);
                                     }
                                 }
                                 Err(e) => {
                                     error!("消息处理失败: {}", e);
-                                    let msg_id = String::from_utf8_lossy(&msg.id).to_string();
-                                    let req_cmd = Command::Requeue(msg_id, 0);
-                                    if let Err(e) = conn.send_command(req_cmd).await {
-                                        error!("发送 REQ 命令失败: {}", e);
-                                        return Err(e);
-                                    } else {
+
+                                    // 检查是否需要自动响应
+                                    if !self.disable_auto_response && !msg_with_conn.is_auto_response_disabled() && !msg_with_conn.has_responded() {
+                                        // 自动发送 REQ
+                                        let msg_id = msg_with_conn.id_string();
+                                        let req_cmd = Command::Requeue(msg_id, 0);
+                                        if let Err(e) = conn.send_command(req_cmd).await {
+                                            error!("发送 REQ 命令失败: {}", e);
+                                            return Err(e);
+                                        } else {
+                                            self.messages_requeued.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                    } else if msg_with_conn.has_responded() {
+                                        // 消息已经手动响应过了，更新统计
                                         self.messages_requeued.fetch_add(1, Ordering::Relaxed);
                                     }
                                 }

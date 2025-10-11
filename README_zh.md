@@ -19,6 +19,7 @@ nsq-async-rs 是一个用 Rust 编写的高性能、可靠的 NSQ 客户端库�
 - 📦 支持批量发布
 - 🔀 支持并发消息处理
 - 🏊‍♂️ 内置生产者连接池
+- 🎯 **支持手动消息确认（Manual Acknowledgement）**
 - 💫 与官方 go-nsq 保持一致的功能特性
 
 ## 安装
@@ -378,6 +379,66 @@ let messages = vec![
     "消息3".as_bytes().to_vec(),
 ];
 producer.publish_multiple("test_topic", messages).await?;
+```
+
+## 手动消息确认
+
+nsq-async-rs 支持手动消息确认，允许你完全控制消息的确认时机。这对于并发处理、批量处理或复杂的错误处理场景非常有用。
+
+### 启用手动确认
+
+```rust
+let config = ConsumerConfig {
+    max_in_flight: 100,
+    disable_auto_response: true, // 启用手动确认
+    ..Default::default()
+};
+```
+
+### 手动确认消息
+
+```rust
+#[async_trait]
+impl Handler for MyHandler {
+    async fn handle_message(&self, message: Message) -> Result<()> {
+        // 发送到工作线程异步处理
+        self.worker_tx.send(message).await?;
+        
+        // 返回 Ok，但不会自动 FIN（因为启用了手动确认）
+        Ok(())
+    }
+}
+
+// 在工作线程中
+async fn worker(message: Message) {
+    match process_message(&message.body).await {
+        Ok(_) => {
+            // 手动发送 FIN
+            message.finish().await.unwrap();
+        }
+        Err(_) => {
+            // 手动重新入队，延迟 5 秒
+            message.requeue(5000).await.unwrap();
+        }
+    }
+}
+```
+
+### API 方法
+
+- `message.finish()` - 发送 FIN 命令，标记消息处理成功
+- `message.requeue(delay)` - 发送 REQ 命令，重新入队消息
+- `message.touch()` - 发送 TOUCH 命令，重置消息超时
+- `message.disable_auto_response()` - 禁用单条消息的自动响应
+
+### 运行示例
+
+```bash
+# 运行手动确认示例
+cargo run --example manual_ack_consume
+
+# 运行自动确认示例（对比）
+cargo run --example simple_consume
 ```
 
 ## 贡献
