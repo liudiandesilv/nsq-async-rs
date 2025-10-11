@@ -219,10 +219,9 @@ impl Message {
     /// 手动发送 FIN 命令
     pub async fn finish(&self) -> Result<()> {
         // 使用 CAS 确保只响应一次
-        if !self
+        if self
             .responded
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err()
         {
             return Ok(()); // 已经响应过了
         }
@@ -237,10 +236,9 @@ impl Message {
     /// 手动发送 REQ 命令
     pub async fn requeue(&self, delay: u32) -> Result<()> {
         // 使用 CAS 确保只响应一次
-        if !self
+        if self
             .responded
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err()
         {
             return Ok(()); // 已经响应过了
         }

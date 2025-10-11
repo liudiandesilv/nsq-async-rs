@@ -228,12 +228,11 @@ impl ConnectionHandler {
                     match frame {
                         Ok(Frame::Response(data)) => {
                             // 检查是否是心跳消息
-                            if data == b"_heartbeat_" {
-                                if let Err(e) = conn.send_command(Command::Nop).await {
+                            if data == b"_heartbeat_"
+                                && let Err(e) = conn.send_command(Command::Nop).await {
                                     error!("发送心跳响应失败: {}", e);
                                     return Err(e);
                                 }
-                            }
                         }
                         Ok(Frame::Error(data)) => {
                             error!("NSQ错误: {:?}", String::from_utf8_lossy(&data));
