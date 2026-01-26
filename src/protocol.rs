@@ -85,8 +85,8 @@ impl <'b> Command <'b> {
                 buf.write_u32::<BigEndian>(bodies.len() as u32)?;
 
                 for body in bodies {
-                    buf.write_u32::<BigEndian>(body.len() as u32)?;
-                    buf.extend_from_slice(body);
+                    buf.write_u32::<BigEndian>((*body).len() as u32)?;
+                    buf.extend_from_slice(*body);
                 }
             }
             Command::Ready(count) => {
