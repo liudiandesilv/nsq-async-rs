@@ -57,7 +57,7 @@ pub async fn publish_message<A: ToSocketAddrs + std::fmt::Display>(
     info!("向主题 {} 发布消息", topic);
 
     connection
-        .send_command(Command::Publish(topic.to_string(), message))
+        .send_command(Command::Publish(topic.to_string(), message.as_ref()))
         .await?;
 
     // 读取响应以确认发布成功
@@ -89,9 +89,9 @@ pub async fn mpublish_messages<A: ToSocketAddrs + std::fmt::Display>(
     let connection = create_nsqd_connection(nsqd_addr, None, None).await?;
 
     info!("向主题 {} 批量发布 {} 条消息", topic, messages.len());
-
+    let mapped_messages = messages.iter().map(|msg| msg.as_ref()).collect();
     connection
-        .send_command(Command::Mpublish(topic.to_string(), messages))
+        .send_command(Command::Mpublish(topic.to_string(), mapped_messages))
         .await?;
 
     // 读取响应以确认发布成功

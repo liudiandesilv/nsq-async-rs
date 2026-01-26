@@ -216,7 +216,7 @@ impl Producer for NsqProducer {
             .build();
 
         let topic_owned = topic.to_string();
-        let message_bytes = message.as_ref().to_vec();
+        let message_bytes = message.as_ref();
 
         let result = backoff::future::retry(backoff, || async {
             let connection = match self.get_publish_connection(&topic_owned).await {
@@ -224,7 +224,7 @@ impl Producer for NsqProducer {
                 Err(e) => return Err(backoff::Error::permanent(e)),
             };
 
-            let cmd = Command::Publish(topic_owned.clone(), message_bytes.clone());
+            let cmd = Command::Publish(topic_owned.clone(), message_bytes);
             match connection.send_command(cmd).await {
                 Ok(_) => {
                     // 读取响应
@@ -268,7 +268,7 @@ impl Producer for NsqProducer {
             .build();
 
         let topic_owned = topic.to_string();
-        let message_bytes = message.as_ref().to_vec();
+        let message_bytes = message.as_ref();
 
         let result = backoff::future::retry(backoff, || async {
             let connection = match self.get_publish_connection(&topic_owned).await {
@@ -278,7 +278,7 @@ impl Producer for NsqProducer {
 
             let cmd = Command::DelayedPublish(
                 topic_owned.clone(),
-                message_bytes.clone(),
+                message_bytes,
                 delay.as_millis() as u32,
             );
             match connection.send_command(cmd).await {
@@ -339,7 +339,9 @@ impl Producer for NsqProducer {
                 Err(e) => return Err(backoff::Error::permanent(e)),
             };
 
-            let cmd = Command::Mpublish(topic_owned.clone(), byte_messages.clone());
+            let mapped_byte_messages: Vec<&[u8]> =
+                byte_messages.iter().map(|msg| msg.as_ref()).collect();
+            let cmd = Command::Mpublish(topic_owned.clone(), mapped_byte_messages);
             match connection.send_command(cmd).await {
                 Ok(_) => {
                     // 读取响应

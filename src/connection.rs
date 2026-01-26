@@ -191,7 +191,7 @@ impl Connection {
     }
 
     /// 发送命令到NSQ服务器
-    pub async fn send_command(&self, command: Command) -> Result<()> {
+    pub async fn send_command<'b>(&self, command: Command<'b>) -> Result<()> {
         let mut stream = self.stream.lock().await;
         let bytes = command.to_bytes()?;
         stream.write_all(&bytes).await?;

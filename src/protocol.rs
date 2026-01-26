@@ -17,17 +17,17 @@ pub const FRAME_TYPE_MESSAGE: i32 = 2;
 
 /// 命令类型枚举
 #[derive(Debug, Clone, PartialEq)]
-pub enum Command {
+pub enum Command <'b>{
     /// 标识服务器身份和特性
     Identify(IdentifyConfig),
     /// 订阅主题和频道
     Subscribe(String, String),
     /// 发布消息到主题
-    Publish(String, Vec<u8>),
+    Publish(String, &'b [u8]),
     /// 延迟发布消息到主题
-    DelayedPublish(String, Vec<u8>, u32),
+    DelayedPublish(String, &'b [u8], u32),
     /// 批量发布消息到主题
-    Mpublish(String, Vec<Vec<u8>>),
+    Mpublish(String, Vec<&'b [u8]>),
     /// 准备接收更多消息
     Ready(u32),
     /// 完成处理消息
@@ -44,7 +44,7 @@ pub enum Command {
     Auth(Option<String>),
 }
 
-impl Command {
+impl <'b> Command <'b> {
     /// 将命令转换为字节以便发送
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         let mut buf = Vec::new();
@@ -63,13 +63,13 @@ impl Command {
                 let cmd = format!("PUB {}\n", topic);
                 buf.extend_from_slice(cmd.as_bytes());
                 buf.write_u32::<BigEndian>(body.len() as u32)?;
-                buf.extend_from_slice(body.as_slice());
+                buf.extend_from_slice(*body);
             }
             Command::DelayedPublish(topic, body, delay) => {
                 let cmd = format!("DPUB {} {}\n", topic, delay);
                 buf.extend_from_slice(cmd.as_bytes());
                 buf.write_u32::<BigEndian>(body.len() as u32)?;
-                buf.extend_from_slice(body.as_slice());
+                buf.extend_from_slice(*body);
             }
             Command::Mpublish(topic, bodies) => {
                 let cmd = format!("MPUB {}\n", topic);
@@ -591,7 +591,7 @@ mod tests {
         let topic = "test_topic".to_string();
         let msg_body = b"test message".to_vec();
 
-        let cmd = Command::Publish(topic, msg_body.clone());
+        let cmd = Command::Publish(topic, msg_body.as_ref());
         let bytes = cmd.to_bytes().unwrap();
 
         // 验证命令前缀
