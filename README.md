@@ -17,9 +17,10 @@ nsq-async-rs is a high-performance, reliable NSQ client library written in Rust.
 - 📊 Built-in message statistics
 - ⚡ Support for delayed publishing
 - 📦 Support for batch publishing
-- 🔀 Support for concurrent message processing
+- 🔀 Support for concurrent message processing (`concurrent_handlers`)
 - 🏊‍♂️ Built-in connection pool for producers
 - 🎯 **Manual message acknowledgement support**
+- ⚡ **Zero-copy publish path** — wire bytes serialized once, reused across retries
 - 💫 Feature parity with official go-nsq
 
 ## Installation
@@ -28,7 +29,7 @@ Add the following to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-nsq-async-rs = "0.1.9"
+nsq-async-rs = "0.1.10"
 ```
 
 ## Quick Start

@@ -156,9 +156,13 @@ impl Connection {
 
     pub async fn send_command(&self, command: Command) -> Result<()> {
         let bytes = command.to_bytes()?;
+        self.write_bytes(&bytes).await
+    }
+
+    pub async fn write_bytes(&self, bytes: &[u8]) -> Result<()> {
         let mut w = self.write_half.lock().await;
         timeout(self.write_timeout, async {
-            w.write_all(&bytes).await?;
+            w.write_all(bytes).await?;
             w.flush().await
         })
         .await??;

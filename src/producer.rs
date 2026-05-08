@@ -208,6 +208,8 @@ impl Producer for NsqProducer {
     }
 
     async fn publish<T: AsRef<[u8]> + Send + Sync>(&self, topic: &str, message: T) -> Result<()> {
+        let wire = Command::Publish(topic.to_string(), message.as_ref().to_vec()).to_bytes()?;
+
         let backoff = ExponentialBackoffBuilder::new()
             .with_initial_interval(self.config.backoff_config.initial_interval)
             .with_max_interval(self.config.backoff_config.max_interval)
@@ -216,41 +218,28 @@ impl Producer for NsqProducer {
             .build();
 
         let topic_owned = topic.to_string();
-        let message_bytes = message.as_ref().to_vec();
 
-        let result = backoff::future::retry(backoff, || async {
+        backoff::future::retry(backoff, || async {
             let connection = match self.get_publish_connection(&topic_owned).await {
                 Ok(conn) => conn,
                 Err(e) => return Err(backoff::Error::permanent(e)),
             };
 
-            let cmd = Command::Publish(topic_owned.clone(), message_bytes.clone());
-            match connection.send_command(cmd).await {
-                Ok(_) => {
-                    // 读取响应
-                    match connection.read_frame().await {
-                        Ok(Frame::Response(_)) => Ok(()),
-                        Ok(Frame::Error(data)) => {
-                            let error_msg = String::from_utf8_lossy(&data);
-                            Err(backoff::Error::transient(Error::Protocol(
-                                ProtocolError::Other(error_msg.to_string()),
-                            )))
-                        }
-                        Ok(_) => Err(backoff::Error::transient(Error::Protocol(
-                            ProtocolError::Other("收到意外响应".to_string()),
-                        ))),
-                        Err(e) => Err(backoff::Error::transient(e)),
-                    }
-                }
+            match connection.write_bytes(&wire).await {
+                Ok(_) => match connection.read_frame().await {
+                    Ok(Frame::Response(_)) => Ok(()),
+                    Ok(Frame::Error(data)) => Err(backoff::Error::transient(Error::Protocol(
+                        ProtocolError::Other(String::from_utf8_lossy(&data).to_string()),
+                    ))),
+                    Ok(_) => Err(backoff::Error::transient(Error::Protocol(
+                        ProtocolError::Other("收到意外响应".to_string()),
+                    ))),
+                    Err(e) => Err(backoff::Error::transient(e)),
+                },
                 Err(e) => Err(backoff::Error::transient(e)),
             }
         })
-        .await;
-
-        match result {
-            Ok(_) => Ok(()),
-            Err(e) => Err(e),
-        }
+        .await
     }
 
     async fn publish_delayed<T: AsRef<[u8]> + Send + Sync>(
@@ -259,7 +248,13 @@ impl Producer for NsqProducer {
         message: T,
         delay: Duration,
     ) -> Result<()> {
-        // 初始化退避策略
+        let wire = Command::DelayedPublish(
+            topic.to_string(),
+            message.as_ref().to_vec(),
+            delay.as_millis() as u32,
+        )
+        .to_bytes()?;
+
         let backoff = ExponentialBackoffBuilder::new()
             .with_initial_interval(self.config.backoff_config.initial_interval)
             .with_max_interval(self.config.backoff_config.max_interval)
@@ -268,45 +263,28 @@ impl Producer for NsqProducer {
             .build();
 
         let topic_owned = topic.to_string();
-        let message_bytes = message.as_ref().to_vec();
 
-        let result = backoff::future::retry(backoff, || async {
+        backoff::future::retry(backoff, || async {
             let connection = match self.get_publish_connection(&topic_owned).await {
                 Ok(conn) => conn,
                 Err(e) => return Err(backoff::Error::permanent(e)),
             };
 
-            let cmd = Command::DelayedPublish(
-                topic_owned.clone(),
-                message_bytes.clone(),
-                delay.as_millis() as u32,
-            );
-            match connection.send_command(cmd).await {
-                Ok(_) => {
-                    // 读取响应
-                    match connection.read_frame().await {
-                        Ok(Frame::Response(_)) => Ok(()),
-                        Ok(Frame::Error(data)) => {
-                            let error_msg = String::from_utf8_lossy(&data);
-                            Err(backoff::Error::transient(Error::Protocol(
-                                ProtocolError::Other(error_msg.to_string()),
-                            )))
-                        }
-                        Ok(_) => Err(backoff::Error::transient(Error::Protocol(
-                            ProtocolError::Other("收到意外响应".to_string()),
-                        ))),
-                        Err(e) => Err(backoff::Error::transient(e)),
-                    }
-                }
+            match connection.write_bytes(&wire).await {
+                Ok(_) => match connection.read_frame().await {
+                    Ok(Frame::Response(_)) => Ok(()),
+                    Ok(Frame::Error(data)) => Err(backoff::Error::transient(Error::Protocol(
+                        ProtocolError::Other(String::from_utf8_lossy(&data).to_string()),
+                    ))),
+                    Ok(_) => Err(backoff::Error::transient(Error::Protocol(
+                        ProtocolError::Other("收到意外响应".to_string()),
+                    ))),
+                    Err(e) => Err(backoff::Error::transient(e)),
+                },
                 Err(e) => Err(backoff::Error::transient(e)),
             }
         })
-        .await;
-
-        match result {
-            Ok(_) => Ok(()),
-            Err(e) => Err(e),
-        }
+        .await
     }
 
     async fn publish_multi<T: AsRef<[u8]> + Send + Sync>(
@@ -319,11 +297,10 @@ impl Producer for NsqProducer {
             return Ok(());
         }
 
-        // 将消息转换为字节向量
         let byte_messages: Vec<Vec<u8>> =
             messages.iter().map(|msg| msg.as_ref().to_vec()).collect();
+        let wire = Command::Mpublish(topic.to_string(), byte_messages).to_bytes()?;
 
-        // 使用与批量发送相同的逻辑处理
         let backoff = ExponentialBackoffBuilder::new()
             .with_initial_interval(self.config.backoff_config.initial_interval)
             .with_max_interval(self.config.backoff_config.max_interval)
@@ -333,39 +310,27 @@ impl Producer for NsqProducer {
 
         let topic_owned = topic.to_string();
 
-        let result = backoff::future::retry(backoff, || async {
+        backoff::future::retry(backoff, || async {
             let connection = match self.get_publish_connection(&topic_owned).await {
                 Ok(conn) => conn,
                 Err(e) => return Err(backoff::Error::permanent(e)),
             };
 
-            let cmd = Command::Mpublish(topic_owned.clone(), byte_messages.clone());
-            match connection.send_command(cmd).await {
-                Ok(_) => {
-                    // 读取响应
-                    match connection.read_frame().await {
-                        Ok(Frame::Response(_)) => Ok(()),
-                        Ok(Frame::Error(data)) => {
-                            let error_msg = String::from_utf8_lossy(&data);
-                            Err(backoff::Error::transient(Error::Protocol(
-                                ProtocolError::Other(error_msg.to_string()),
-                            )))
-                        }
-                        Ok(_) => Err(backoff::Error::transient(Error::Protocol(
-                            ProtocolError::Other("收到意外响应".to_string()),
-                        ))),
-                        Err(e) => Err(backoff::Error::transient(e)),
-                    }
-                }
+            match connection.write_bytes(&wire).await {
+                Ok(_) => match connection.read_frame().await {
+                    Ok(Frame::Response(_)) => Ok(()),
+                    Ok(Frame::Error(data)) => Err(backoff::Error::transient(Error::Protocol(
+                        ProtocolError::Other(String::from_utf8_lossy(&data).to_string()),
+                    ))),
+                    Ok(_) => Err(backoff::Error::transient(Error::Protocol(
+                        ProtocolError::Other("收到意外响应".to_string()),
+                    ))),
+                    Err(e) => Err(backoff::Error::transient(e)),
+                },
                 Err(e) => Err(backoff::Error::transient(e)),
             }
         })
-        .await;
-
-        match result {
-            Ok(_) => Ok(()),
-            Err(e) => Err(e),
-        }
+        .await
     }
 }
 

@@ -17,9 +17,10 @@ nsq-async-rs 是一个用 Rust 编写的高性能、可靠的 NSQ 客户端库�
 - 📊 内置消息统计
 - ⚡ 支持延迟发布
 - 📦 支持批量发布
-- 🔀 支持并发消息处理
+- 🔀 支持并发消息处理（`concurrent_handlers`）
 - 🏊‍♂️ 内置生产者连接池
 - 🎯 **支持手动消息确认（Manual Acknowledgement）**
+- ⚡ **零拷贝发布路径** — wire bytes 只序列化一次，重试时复用
 - 💫 与官方 go-nsq 保持一致的功能特性
 
 ## 安装
@@ -28,7 +29,7 @@ nsq-async-rs 是一个用 Rust 编写的高性能、可靠的 NSQ 客户端库�
 
 ```toml
 [dependencies]
-nsq-async-rs = "0.1.8"
+nsq-async-rs = "0.1.10"
 ```
 
 ## 快速开始
