@@ -174,6 +174,7 @@ async fn main() -> Result<()> {
         max_in_flight: 100,          // 增加同时处理的最大消息数
         max_attempts: 5,             // 最大重试次数
         disable_auto_response: true, // 【关键】禁用自动响应，启用手动确认
+        concurrent_handlers: 20,     // 与 worker_count 对齐
         ..Default::default()
     };
 

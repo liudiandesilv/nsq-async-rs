@@ -28,7 +28,7 @@ Add the following to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-nsq-async-rs = "0.1.8"
+nsq-async-rs = "0.1.9"
 ```
 
 ## Quick Start
@@ -74,117 +74,37 @@ async fn main() -> Result<()> {
 
 ```rust
 use async_trait::async_trait;
-use log::{error, info};
 use nsq_async_rs::consumer::{Consumer, ConsumerConfig, Handler};
 use nsq_async_rs::error::Result;
 use nsq_async_rs::protocol::Message;
-use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, Mutex};
 
-/// Concurrent message handler
-struct ConcurrentMessageHandler {
-    worker_count: usize,
-    sender: Arc<Mutex<mpsc::Sender<Message>>>,
-}
-
-impl ConcurrentMessageHandler {
-    pub fn new(worker_count: usize) -> Self {
-        // Create message channel with buffer size 10x worker count
-        let (tx, rx) = mpsc::channel(worker_count * 10);
-        let sender = Arc::new(Mutex::new(tx));
-        let receiver = Arc::new(Mutex::new(rx));
-
-        let handler = Self {
-            worker_count,
-            sender,
-        };
-
-        // Start worker threads
-        handler.start_workers(receiver);
-
-        handler
-    }
-
-    fn start_workers(&self, receiver: Arc<Mutex<mpsc::Receiver<Message>>>) {
-        for i in 0..self.worker_count {
-            let worker_id = i + 1;
-            let rx = receiver.clone();
-
-            tokio::spawn(async move {
-                info!("Worker {} started", worker_id);
-
-                loop {
-                    // Get message from channel
-                    let msg = {
-                        let mut rx_guard = rx.lock().await;
-                        match rx_guard.recv().await {
-                            Some(msg) => msg,
-                            None => break,
-                        }
-                    };
-
-                    // Process message
-                    let msg_id = String::from_utf8_lossy(&msg.id).to_string();
-                    info!("Worker {} processing message: {}", worker_id, msg_id);
-                    
-                    // Add your message processing logic here
-                    
-                    info!("Worker {} finished processing message: {}", worker_id, msg_id);
-                }
-            });
-        }
-    }
-}
+struct MessageHandler;
 
 #[async_trait]
-impl Handler for ConcurrentMessageHandler {
+impl Handler for MessageHandler {
     async fn handle_message(&self, message: Message) -> Result<()> {
-        let msg_id = String::from_utf8_lossy(&message.id).to_string();
-        let sender = self.sender.lock().await;
-
-        // Try non-blocking send first
-        let send_result = sender.try_send(message.clone());
-        match send_result {
-            Ok(_) => {
-                info!("Message sent to worker channel: ID={}", msg_id);
-            }
-            Err(mpsc::error::TrySendError::Full(msg)) => {
-                // Channel full, use blocking send
-                if let Err(e) = sender.send(msg).await {
-                    error!("Failed to send message to worker channel: {}", e);
-                    return Err(nsq_async_rs::error::Error::Other(e.to_string()));
-                }
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                error!("Worker channel closed: ID={}", msg_id);
-                return Err(nsq_async_rs::error::Error::Other("Worker channel closed".into()));
-            }
-        }
-
+        let msg_id = message.id_string();
+        // Add your message processing logic here
+        println!("Processing message: {}", msg_id);
         Ok(())
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Create consumer config
+    // concurrent_handlers controls how many messages are processed in parallel
     let config = ConsumerConfig {
-        max_in_flight: 100, // Increase for higher throughput
-        max_attempts: 5,
-        // Other config options...
+        max_in_flight: 100,
+        concurrent_handlers: 20,
         ..Default::default()
     };
 
-    // Create concurrent handler with 20 worker threads
-    let handler = ConcurrentMessageHandler::new(20);
-
-    // Create consumer
     let consumer = Consumer::new(
         "test_topic".to_string(),
         "test_channel".to_string(),
         config,
-        handler,
+        MessageHandler,
     )?;
 
     consumer.connect_to_nsqlookupd("http://127.0.0.1:4161".to_string()).await?;
@@ -199,14 +119,17 @@ async fn main() -> Result<()> {
 ### Basic Producer Example
 
 ```rust
-use nsq_async_rs::producer::Producer;
+use nsq_async_rs::producer::{NsqProducer, Producer, ProducerConfig};
 use nsq_async_rs::error::Result;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let producer = Producer::connect("127.0.0.1:4150").await?;
-    
-    producer.publish("test_topic", "Hello, NSQ!".as_bytes()).await?;
+    let producer = NsqProducer::new(ProducerConfig {
+        nsqd_addresses: vec!["127.0.0.1:4150".to_string()],
+        ..Default::default()
+    });
+
+    producer.publish("test_topic", b"Hello, NSQ!").await?;
     Ok(())
 }
 ```
@@ -327,7 +250,9 @@ ConsumerConfig {
     max_requeue_delay: Duration::from_secs(15 * 60), // Maximum requeue delay
     default_requeue_delay: Duration::from_secs(90),  // Default requeue delay
     shutdown_timeout: Duration::from_secs(30),       // Shutdown timeout
-    backoff_strategy: true,                // Enable exponential backoff reconnection strategy
+    backoff_strategy: true,               // Enable exponential backoff reconnection strategy
+    disable_auto_response: false,         // Disable auto FIN/REQ; use manual ack
+    concurrent_handlers: 1,              // Max concurrent handler tasks per connection
 }
 ```
 
@@ -367,18 +292,18 @@ if let Err(err) = result {
 ### Delayed Publishing
 
 ```rust
-producer.publish_with_delay("test_topic", "Delayed message".as_bytes(), Duration::from_secs(60)).await?;
+producer.publish_delayed("test_topic", b"Delayed message", Duration::from_secs(60)).await?;
 ```
 
 ### Batch Publishing
 
 ```rust
-let messages = vec![
-    "Message 1".as_bytes().to_vec(),
-    "Message 2".as_bytes().to_vec(),
-    "Message 3".as_bytes().to_vec(),
+let messages: Vec<Vec<u8>> = vec![
+    b"Message 1".to_vec(),
+    b"Message 2".to_vec(),
+    b"Message 3".to_vec(),
 ];
-producer.publish_multiple("test_topic", messages).await?;
+producer.publish_multi("test_topic", messages).await?;
 ```
 
 ## Manual Message Acknowledgement

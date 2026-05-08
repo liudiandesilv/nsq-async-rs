@@ -5,8 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::time::Duration;
 use thiserror::Error;
-use tokio::sync::Mutex;
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex, Semaphore};
 
 use crate::connection::Connection;
 use crate::error::{Error, Result};
@@ -132,6 +131,9 @@ pub struct ConsumerConfig {
     /// - 批量处理消息
     /// - 需要精确控制消息确认时机
     pub disable_auto_response: bool,
+    /// 并发 handler 数量上限，控制同时处理的消息数
+    /// 默认与 max_in_flight 相同
+    pub concurrent_handlers: usize,
 }
 
 impl Default for ConsumerConfig {
@@ -149,6 +151,7 @@ impl Default for ConsumerConfig {
             shutdown_timeout: Duration::from_secs(30),
             backoff_strategy: true,
             disable_auto_response: false,
+            concurrent_handlers: 1,
         }
     }
 }
@@ -160,18 +163,17 @@ pub struct Consumer {
     handler: Arc<dyn Handler + Send + Sync + 'static>,
 
     // Stats
-    messages_received: AtomicU64,
-    messages_finished: AtomicU64,
-    messages_requeued: AtomicU64,
+    messages_received: Arc<AtomicU64>,
+    messages_finished: Arc<AtomicU64>,
+    messages_requeued: Arc<AtomicU64>,
 
     // Connection management
     connections: Arc<Mutex<HashMap<String, Arc<Connection>>>>,
-    total_rdy_count: AtomicI32,
-    max_in_flight: AtomicI32,
+    connection_count: Arc<AtomicI32>,
+    max_in_flight: Arc<AtomicI32>,
 
     // Control
-    is_running: AtomicBool,
-    stop_chan: mpsc::Sender<()>,
+    is_running: Arc<AtomicBool>,
 }
 
 struct ConnectionHandler {
@@ -181,132 +183,150 @@ struct ConnectionHandler {
     messages_received: Arc<AtomicU64>,
     messages_finished: Arc<AtomicU64>,
     messages_requeued: Arc<AtomicU64>,
-    total_rdy_count: Arc<AtomicI32>,
     max_in_flight: Arc<AtomicI32>,
+    is_running: Arc<AtomicBool>,
     disable_auto_response: bool,
+    semaphore: Arc<Semaphore>,
 }
 
 impl ConnectionHandler {
     fn new(consumer: &Consumer) -> Self {
+        let concurrent = consumer.config.concurrent_handlers.max(1);
         Self {
             topic: consumer.topic.clone(),
             channel: consumer.channel.clone(),
             handler: consumer.handler.clone(),
-            messages_received: Arc::new(AtomicU64::new(0)),
-            messages_finished: Arc::new(AtomicU64::new(0)),
-            messages_requeued: Arc::new(AtomicU64::new(0)),
-            total_rdy_count: Arc::new(AtomicI32::new(0)),
-            max_in_flight: Arc::new(AtomicI32::new(consumer.config.max_in_flight)),
+            messages_received: Arc::clone(&consumer.messages_received),
+            messages_finished: Arc::clone(&consumer.messages_finished),
+            messages_requeued: Arc::clone(&consumer.messages_requeued),
+            max_in_flight: Arc::clone(&consumer.max_in_flight),
+            is_running: Arc::clone(&consumer.is_running),
             disable_auto_response: consumer.config.disable_auto_response,
+            semaphore: Arc::new(Semaphore::new(concurrent)),
         }
     }
 
     async fn handle_connection(&self, conn: Arc<Connection>) -> Result<()> {
-        // 发送订阅命令
         let sub_cmd = Command::Subscribe(self.topic.clone(), self.channel.clone());
         conn.send_command(sub_cmd).await?;
 
-        // 发送就绪命令
+        let total_rdy_count = Arc::new(AtomicI32::new(0));
         let rdy_count = self.max_in_flight.load(Ordering::Relaxed);
-        let rdy_cmd = Command::Ready(rdy_count as u32);
-        conn.send_command(rdy_cmd).await?;
+        conn.send_command(Command::Ready(rdy_count as u32)).await?;
+        total_rdy_count.store(rdy_count, Ordering::Relaxed);
 
-        // 创建心跳间隔
         let mut heartbeat_interval = tokio::time::interval(Duration::from_secs(30));
 
         loop {
+            if !self.is_running.load(Ordering::Relaxed) {
+                info!("消费者已停止，结束连接处理循环");
+                return Ok(());
+            }
+
             tokio::select! {
-                // 主动心跳检测
                 _ = heartbeat_interval.tick() => {
                     if let Err(e) = conn.handle_heartbeat().await {
                         error!("心跳检测失败: {}", e);
                         return Err(e);
                     }
                 }
-                // 接收并处理消息
-                frame = conn.read_frame() =>
-                    match frame {
-                        Ok(Frame::Response(data)) => {
-                            // 检查是否是心跳消息
-                            if data == b"_heartbeat_"
-                                && let Err(e) = conn.send_command(Command::Nop).await {
-                                    error!("发送心跳响应失败: {}", e);
-                                    return Err(e);
-                                }
-                        }
-                        Ok(Frame::Error(data)) => {
-                            error!("NSQ错误: {:?}", String::from_utf8_lossy(&data));
-                            // 如果是致命错误，需要重新连接
-                            if String::from_utf8_lossy(&data).contains("E_INVALID") {
-                                return Err(Error::Protocol(ProtocolError::Other(
-                                    String::from_utf8_lossy(&data).to_string()
-                                )));
+                frame = conn.read_frame() => match frame {
+                    Ok(Frame::Response(data)) => {
+                        if data == b"_heartbeat_" {
+                            if let Err(e) = conn.send_command(Command::Nop).await {
+                                error!("发送心跳响应失败: {}", e);
+                                return Err(e);
                             }
                         }
-                        Ok(Frame::Message(msg)) => {
-                            self.messages_received.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Ok(Frame::Error(data)) => {
+                        error!("NSQ错误: {:?}", String::from_utf8_lossy(&data));
+                        if String::from_utf8_lossy(&data).contains("E_INVALID") {
+                            return Err(Error::Protocol(ProtocolError::Other(
+                                String::from_utf8_lossy(&data).to_string(),
+                            )));
+                        }
+                    }
+                    Ok(Frame::Message(msg)) => {
+                        self.messages_received.fetch_add(1, Ordering::Relaxed);
+                        let msg_with_conn = msg.with_responder(Arc::clone(&conn));
 
-                            // 为消息附加连接引用（用于手动确认）
-                            let msg_with_conn = msg.with_responder(Arc::clone(&conn));
+                        let permit = Arc::clone(&self.semaphore)
+                            .acquire_owned()
+                            .await
+                            .map_err(|_| Error::Other("semaphore closed".to_string()))?;
 
-                            // 处理消息
-                            match self.handler.handle_message(msg_with_conn.clone()).await {
+                        let handler = Arc::clone(&self.handler);
+                        let conn_write = Arc::clone(&conn);
+                        let messages_finished = Arc::clone(&self.messages_finished);
+                        let messages_requeued = Arc::clone(&self.messages_requeued);
+                        let disable_auto_response = self.disable_auto_response;
+                        let max_in_flight = self.max_in_flight.load(Ordering::Relaxed);
+                        let rdy_ref = Arc::clone(&total_rdy_count);
+
+                        tokio::spawn(async move {
+                            let _permit = permit;
+
+                            match handler.handle_message(msg_with_conn.clone()).await {
                                 Ok(_) => {
-                                    // 检查是否需要自动响应
-                                    if !self.disable_auto_response && !msg_with_conn.is_auto_response_disabled() && !msg_with_conn.has_responded() {
-                                        // 自动发送 FIN
-                                        let msg_id = msg_with_conn.id_string();
-                                        let fin_cmd = Command::Finish(msg_id);
-                                        if let Err(e) = conn.send_command(fin_cmd).await {
+                                    if !disable_auto_response
+                                        && !msg_with_conn.is_auto_response_disabled()
+                                        && !msg_with_conn.has_responded()
+                                    {
+                                        if let Err(e) = conn_write
+                                            .send_command(Command::Finish(msg_with_conn.id_string()))
+                                            .await
+                                        {
                                             error!("发送 FIN 命令失败: {}", e);
-                                            return Err(e);
-                                        } else {
-                                            self.messages_finished.fetch_add(1, Ordering::Relaxed);
+                                            return;
                                         }
+                                        messages_finished.fetch_add(1, Ordering::Relaxed);
                                     } else if msg_with_conn.has_responded() {
-                                        // 消息已经手动响应过了，更新统计
-                                        self.messages_finished.fetch_add(1, Ordering::Relaxed);
+                                        messages_finished.fetch_add(1, Ordering::Relaxed);
                                     }
                                 }
                                 Err(e) => {
                                     error!("消息处理失败: {}", e);
-
-                                    // 检查是否需要自动响应
-                                    if !self.disable_auto_response && !msg_with_conn.is_auto_response_disabled() && !msg_with_conn.has_responded() {
-                                        // 自动发送 REQ
-                                        let msg_id = msg_with_conn.id_string();
-                                        let req_cmd = Command::Requeue(msg_id, 0);
-                                        if let Err(e) = conn.send_command(req_cmd).await {
+                                    if !disable_auto_response
+                                        && !msg_with_conn.is_auto_response_disabled()
+                                        && !msg_with_conn.has_responded()
+                                    {
+                                        if let Err(e) = conn_write
+                                            .send_command(Command::Requeue(
+                                                msg_with_conn.id_string(),
+                                                0,
+                                            ))
+                                            .await
+                                        {
                                             error!("发送 REQ 命令失败: {}", e);
-                                            return Err(e);
-                                        } else {
-                                            self.messages_requeued.fetch_add(1, Ordering::Relaxed);
+                                            return;
                                         }
+                                        messages_requeued.fetch_add(1, Ordering::Relaxed);
                                     } else if msg_with_conn.has_responded() {
-                                        // 消息已经手动响应过了，更新统计
-                                        self.messages_requeued.fetch_add(1, Ordering::Relaxed);
+                                        messages_requeued.fetch_add(1, Ordering::Relaxed);
                                     }
                                 }
                             }
 
-                            // 更新 RDY 计数
-                            let current_rdy = self.total_rdy_count.fetch_sub(1, Ordering::Relaxed);
-                            if current_rdy <= self.max_in_flight.load(Ordering::Relaxed) / 2 {
-                                let new_rdy = self.max_in_flight.load(Ordering::Relaxed);
-                                let rdy_cmd = Command::Ready(new_rdy as u32);
-                                if let Err(e) = conn.send_command(rdy_cmd).await {
+                            // handler 完成后补充 RDY
+                            let remaining = rdy_ref.fetch_sub(1, Ordering::Relaxed) - 1;
+                            if remaining <= max_in_flight / 2 {
+                                if let Err(e) = conn_write
+                                    .send_command(Command::Ready(max_in_flight as u32))
+                                    .await
+                                {
                                     error!("发送 RDY 命令失败: {}", e);
-                                    return Err(e);
                                 } else {
-                                    self.total_rdy_count.store(new_rdy, Ordering::Relaxed);
+                                    rdy_ref.store(max_in_flight, Ordering::Relaxed);
                                 }
                             }
-                        }
-                        Err(e) => {
-                            error!("读取帧失败: {}", e);
-                            return Err(e);
-                        }
+                        });
                     }
+                    Err(e) => {
+                        error!("读取帧失败: {}", e);
+                        return Err(e);
+                    }
+                }
             }
         }
     }
@@ -326,21 +346,18 @@ impl Consumer {
             return Err(Error::Other(format!("Invalid channel name: {}", channel)));
         }
 
-        let (stop_tx, _) = mpsc::channel(1);
-
         Ok(Consumer {
             topic,
             channel,
             config: config.clone(),
             handler: Arc::new(handler),
-            messages_received: AtomicU64::new(0),
-            messages_finished: AtomicU64::new(0),
-            messages_requeued: AtomicU64::new(0),
+            messages_received: Arc::new(AtomicU64::new(0)),
+            messages_finished: Arc::new(AtomicU64::new(0)),
+            messages_requeued: Arc::new(AtomicU64::new(0)),
             connections: Arc::new(Mutex::new(HashMap::new())),
-            total_rdy_count: AtomicI32::new(0),
-            max_in_flight: AtomicI32::new(config.max_in_flight),
-            is_running: AtomicBool::new(false),
-            stop_chan: stop_tx,
+            connection_count: Arc::new(AtomicI32::new(0)),
+            max_in_flight: Arc::new(AtomicI32::new(config.max_in_flight)),
+            is_running: Arc::new(AtomicBool::new(true)),
         })
     }
 
@@ -367,7 +384,7 @@ impl Consumer {
             messages_received: self.messages_received.load(Ordering::Relaxed),
             messages_finished: self.messages_finished.load(Ordering::Relaxed),
             messages_requeued: self.messages_requeued.load(Ordering::Relaxed),
-            connections: self.connections.blocking_lock().len() as i32,
+            connections: self.connection_count.load(Ordering::Relaxed),
         }
     }
 
@@ -403,6 +420,11 @@ impl Consumer {
             let mut retry_count = 0;
 
             loop {
+                if !handler.is_running.load(Ordering::Relaxed) {
+                    info!("消费者已停止，结束到 {} 的重连循环", addr_clone);
+                    break;
+                }
+
                 match handler.handle_connection(Arc::clone(&conn_clone)).await {
                     Ok(_) => {
                         info!("连接循环正常结束");
@@ -410,6 +432,11 @@ impl Consumer {
                     }
                     Err(e) => {
                         retry_count += 1;
+                        if !handler.is_running.load(Ordering::Relaxed) {
+                            info!("消费者已停止，不再重连 {}", addr_clone);
+                            break;
+                        }
+
                         let is_connection_error = matches!(e,
                             Error::Io(ref io_err) if io_err.kind() == std::io::ErrorKind::BrokenPipe
                             || io_err.kind() == std::io::ErrorKind::ConnectionReset
@@ -433,6 +460,11 @@ impl Consumer {
 
                             info!("将在 {}秒 后尝试重新连接到 {}", sleep_duration, addr_clone);
                             tokio::time::sleep(Duration::from_secs(sleep_duration)).await;
+
+                            if !handler.is_running.load(Ordering::Relaxed) {
+                                info!("消费者已停止，跳过重连 {}", addr_clone);
+                                break;
+                            }
 
                             // 尝试重新建立连接
                             match conn_clone.reconnect().await {
@@ -458,12 +490,14 @@ impl Consumer {
         });
 
         conns.insert(addr, conn);
+        self.connection_count.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 
     pub async fn disconnect_from_nsqd(&self, addr: String) -> Result<()> {
         let mut conns = self.connections.lock().await;
         if let Some(conn) = conns.remove(&addr) {
+            self.connection_count.fetch_sub(1, Ordering::Relaxed);
             conn.close().await?;
         }
         Ok(())
@@ -477,9 +511,6 @@ impl Consumer {
     pub async fn stop(&self) -> Result<()> {
         info!("开始优雅关闭消费者...");
         self.is_running.store(false, Ordering::Relaxed);
-
-        // 发送停止信号
-        let _ = self.stop_chan.send(()).await;
 
         // 等待所有连接关闭或超时
         let shutdown_deadline = tokio::time::sleep(self.config.shutdown_timeout);
@@ -503,6 +534,7 @@ impl Consumer {
                 }
             }
         }
+        self.connection_count.store(0, Ordering::Relaxed);
 
         info!("消费者已关闭");
         Ok(())
@@ -526,6 +558,12 @@ impl Consumer {
             let mut interval = tokio::time::interval(consumer.config.lookup_poll_interval);
             loop {
                 interval.tick().await;
+
+                if !consumer.is_running.load(Ordering::Relaxed) {
+                    info!("消费者已停止，结束 nsqlookupd poll loop");
+                    break;
+                }
+
                 match crate::lookup::lookup_nodes(&lookupd_url, &consumer.topic).await {
                     Ok(nodes) => {
                         for node in nodes {
@@ -552,14 +590,82 @@ impl Clone for Consumer {
             channel: self.channel.clone(),
             config: self.config.clone(),
             handler: self.handler.clone(),
-            messages_received: AtomicU64::new(self.messages_received.load(Ordering::Relaxed)),
-            messages_finished: AtomicU64::new(self.messages_finished.load(Ordering::Relaxed)),
-            messages_requeued: AtomicU64::new(self.messages_requeued.load(Ordering::Relaxed)),
-            connections: self.connections.clone(),
-            total_rdy_count: AtomicI32::new(self.total_rdy_count.load(Ordering::Relaxed)),
-            max_in_flight: AtomicI32::new(self.max_in_flight.load(Ordering::Relaxed)),
-            is_running: AtomicBool::new(self.is_running.load(Ordering::Relaxed)),
-            stop_chan: self.stop_chan.clone(),
+            messages_received: Arc::clone(&self.messages_received),
+            messages_finished: Arc::clone(&self.messages_finished),
+            messages_requeued: Arc::clone(&self.messages_requeued),
+            connections: Arc::clone(&self.connections),
+            connection_count: Arc::clone(&self.connection_count),
+            max_in_flight: Arc::clone(&self.max_in_flight),
+            is_running: Arc::clone(&self.is_running),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct NoopHandler;
+
+    #[async_trait]
+    impl Handler for NoopHandler {
+        async fn handle_message(&self, _message: ProtocolMessage) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn new_consumer() -> Consumer {
+        Consumer::new(
+            "test_topic".to_string(),
+            "test_channel".to_string(),
+            ConsumerConfig::default(),
+            NoopHandler,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn connection_handler_reuses_consumer_shared_state() {
+        let consumer = new_consumer();
+        let handler = ConnectionHandler::new(&consumer);
+
+        assert!(Arc::ptr_eq(
+            &handler.messages_received,
+            &consumer.messages_received
+        ));
+        assert!(Arc::ptr_eq(
+            &handler.messages_finished,
+            &consumer.messages_finished
+        ));
+        assert!(Arc::ptr_eq(
+            &handler.messages_requeued,
+            &consumer.messages_requeued
+        ));
+        assert!(Arc::ptr_eq(&handler.max_in_flight, &consumer.max_in_flight));
+        assert!(Arc::ptr_eq(&handler.is_running, &consumer.is_running));
+    }
+
+    #[test]
+    fn consumer_clone_shares_runtime_state() {
+        let consumer = new_consumer();
+        let cloned = consumer.clone();
+
+        consumer.messages_received.store(3, Ordering::Relaxed);
+        consumer.connection_count.store(2, Ordering::Relaxed);
+        consumer.is_running.store(false, Ordering::Relaxed);
+
+        assert_eq!(cloned.messages_received.load(Ordering::Relaxed), 3);
+        assert_eq!(cloned.connection_count.load(Ordering::Relaxed), 2);
+        assert!(!cloned.is_running.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stats_reads_connection_count_in_async_context() {
+        let consumer = new_consumer();
+        consumer.connection_count.store(2, Ordering::Relaxed);
+
+        let stats = consumer.stats();
+
+        assert_eq!(stats.connections, 2);
     }
 }

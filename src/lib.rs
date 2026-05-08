@@ -13,7 +13,7 @@ pub mod protocol;
 // 重导出常用类型
 pub use consumer::{Consumer, ConsumerConfig, Handler};
 pub use error::{Error, Result};
-pub use producer::{Producer, ProducerConfig, new_producer};
+pub use producer::{new_producer, Producer, ProducerConfig};
 
 pub use connection::Connection;
 pub use protocol::{Frame, Protocol, ProtocolError};

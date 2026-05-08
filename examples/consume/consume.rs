@@ -157,6 +157,7 @@ async fn main() -> Result<()> {
         shutdown_timeout: Duration::from_secs(30),
         backoff_strategy: true,       // 启用指数退避重连策略
         disable_auto_response: false, // 使用自动响应模式
+        concurrent_handlers: 20,      // 与 worker_count 对齐
     };
 
     // 创建并发消息处理器，指定 20 个工作线程
